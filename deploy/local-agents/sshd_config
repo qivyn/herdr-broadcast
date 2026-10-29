@@ -1,0 +1,16 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /etc/ssh/keys/ssh_host_ed25519_key
+PermitRootLogin no
+AllowUsers node
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_* COLORTERM
+Subsystem sftp internal-sftp

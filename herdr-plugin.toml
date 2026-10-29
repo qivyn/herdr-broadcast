@@ -1,0 +1,40 @@
+id = "herdr-broadcast"
+name = "Broadcast"
+version = "0.3.0"
+min_herdr_version = "0.9.5"
+description = "Send one prompt to many agents (existing or new, local or over SSH) from a web page, and watch every agent's screen as it works"
+platforms = ["linux", "macos"]
+
+# Bun runs TypeScript directly; install the locally served terminal assets.
+[[build]]
+command = ["sh", "scripts/with-bun.sh", "install", "--production", "--frozen-lockfile"]
+
+# The broadcast web page (http://127.0.0.1:7318 by default). The startup hook starts it with
+# Herdr; these start and stop it by hand.
+[[actions]]
+id = "web"
+title = "Broadcast: 网页"
+contexts = ["workspace"]
+command = ["sh", "scripts/with-bun.sh", "src/main.ts", "web-start"]
+
+[[actions]]
+id = "web-stop"
+title = "Broadcast: 停止网页"
+contexts = ["workspace"]
+command = ["sh", "scripts/with-bun.sh", "src/main.ts", "web-stop"]
+
+[[actions]]
+id = "web-restart"
+title = "Broadcast: 重启服务"
+contexts = ["workspace"]
+command = ["sh", "scripts/with-bun.sh", "src/main.ts", "web-restart"]
+
+[[actions]]
+id = "web-status"
+title = "Broadcast: 网页状态"
+contexts = ["workspace"]
+command = ["sh", "scripts/with-bun.sh", "src/main.ts", "web-status"]
+
+# Start the single Web service; only explicit user submissions send messages.
+[[startup]]
+command = ["sh", "scripts/with-bun.sh", "src/main.ts", "hook"]

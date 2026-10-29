@@ -1,0 +1,42 @@
+name: local-agents
+
+x-agent: &agent
+  image: local/agent-tools:2026-10-23
+  build:
+    context: .
+  init: true
+  stdin_open: true
+  tty: true
+  restart: unless-stopped
+  working_dir: /workspace
+
+services:
+  agent1:
+    <<: *agent
+    container_name: ai-agent-1
+    hostname: ai-agent-1
+    ports:
+      - "127.0.0.1:2221:22"
+    volumes:
+      - agent1-home:/home/node
+      - agent1-workspace:/workspace
+      - agent1-ssh:/etc/ssh/keys
+
+  agent2:
+    <<: *agent
+    container_name: ai-agent-2
+    hostname: ai-agent-2
+    ports:
+      - "127.0.0.1:2222:22"
+    volumes:
+      - agent2-home:/home/node
+      - agent2-workspace:/workspace
+      - agent2-ssh:/etc/ssh/keys
+
+volumes:
+  agent1-home:
+  agent1-workspace:
+  agent1-ssh:
+  agent2-home:
+  agent2-workspace:
+  agent2-ssh:
