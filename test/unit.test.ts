@@ -11,6 +11,8 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "bun:sqlite";
+import { createServer, type ServerResponse } from "node:http";
+import { once } from "node:events";
 
 describe("folders for the form", () => {
   test("suggests the folders under what is typed, hidden ones only when a dot is typed", () => {
@@ -188,30 +190,50 @@ describe("ssh machines", () => {
     const body = new Uint8Array(300_000).map((_, i) => i % 251);
     const sha = new Bun.CryptoHasher("sha256").update(body).digest("hex");
     let requests = 0;
-    const server = Bun.serve({ port: 0, fetch(req) {
-      const url = new URL(req.url);
-      if (url.pathname === "/latest.json") return Response.json({ version: "0.9.5", assets: { "linux-aarch64": `${url.origin}/bin` }, sha256: { "linux-aarch64": sha } });
+    const ranges: (string | null)[] = [];
+    let interrupted: ServerResponse | undefined;
+    const server = createServer((req, res) => {
+      if (req.url === "/latest.json") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ version: "0.9.5", assets: { "linux-aarch64": `http://${req.headers.host}/bin` }, sha256: { "linux-aarch64": sha } }));
+        return;
+      }
       requests += 1;
-      const from = Number(/bytes=(\d+)-/.exec(req.headers.get("range") ?? "")?.[1] ?? 0);
-      // the first answer stops halfway, as a dropped connection does
-      const end = requests === 1 ? 150_000 : body.length;
-      const stream = new ReadableStream({ start(c) { c.enqueue(body.slice(from, end)); if (end < body.length) c.error(new Error("dropped")); else c.close(); } });
-      return new Response(stream, { status: from ? 206 : 200, headers: from ? { "content-range": `bytes ${from}-${body.length - 1}/${body.length}` } : { "content-length": String(body.length) } });
-    } });
+      ranges.push(req.headers.range ?? null);
+      const from = Number(/bytes=(\d+)-/.exec(req.headers.range ?? "")?.[1] ?? 0);
+      res.writeHead(from ? 206 : 200, { "content-length": String(body.length - from),
+        ...(from ? { "content-range": `bytes ${from}-${body.length - 1}/${body.length}` } : {}) });
+      if (requests === 1) {
+        interrupted = res;
+        res.write(body.slice(0, 150_000));
+      } else res.end(body.slice(from));
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address() as { port: number };
     const dir = mkdtempSync(join(tmpdir(), "bcast-asset-"));
-    process.env.HERDR_BROADCAST_RELEASES_URL = `http://127.0.0.1:${server.port}/latest.json`;
+    process.env.HERDR_BROADCAST_RELEASES_URL = `http://127.0.0.1:${address.port}/latest.json`;
     try {
-      const file = await herdrAsset(dir, "0.9.5", "linux-aarch64", () => undefined, new AbortController().signal);
+      const file = await herdrAsset(dir, "0.9.5", "linux-aarch64", (progress) => {
+        // Drop the transport only after the client saved the first half. No artificial
+        // server exception is logged, and the next request must resume those bytes.
+        if (interrupted && progress.done === 150_000) {
+          interrupted.destroy();
+          interrupted = undefined;
+        }
+      }, AbortSignal.timeout(5_000));
       expect(new Uint8Array(await Bun.file(file).arrayBuffer())).toEqual(body);
       expect(requests).toBe(2);
+      expect(ranges).toEqual([null, "bytes=150000-"]);
       await herdrAsset(dir, "0.9.5", "linux-aarch64", () => undefined, new AbortController().signal);
       expect(requests).toBe(2);
     } finally {
       delete process.env.HERDR_BROADCAST_RELEASES_URL;
-      server.stop(true);
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 10_000);
 
   test("machine status is matched to machines by id or label", () => {
     const machines = [{ id: "m-1", label: "gpu" }, { id: "m-2", label: "build" }];
