@@ -102,6 +102,24 @@ test('confirmed manager replacement persists both versions; explicit stop remove
   }finally{await stop(f,child);}
 },10000);
 
+for (const failure of [false, true]) test(`restarting the same release preserves a known update after ${failure ? 'rollback' : 'success'}`, async () => {
+  const f = fixture(), old = f.make('old'); let child: ChildProcess | undefined;
+  atomicJSON(join(f.dir, 'update.json'), { kind: 'github', action: 'restart', phase: 'idle', available: true,
+    latest_revision: 'new', latest_version: '0.3.1', checked_at: 123, blocked_reason: null, error: null });
+  try {
+    child = await launch(f, old); atomicJSON(join(f.dir, 'candidate.json'), failure ? { ...old, hash: 'invalid' } : old);
+    await callSocket(socketPath(f.database), 'restart');
+    await until(() => JSON.parse(readFileSync(join(f.dir, 'update.json'), 'utf8')).outcome === (failure ? 'failed' : 'succeeded'), 5000);
+    const end = Date.now() + 5000;
+    while ((await callSocket(socketPath(f.database), 'status')).switching) {
+      if (Date.now() > end) throw new Error('restart confirmation timeout');
+      await Bun.sleep(25);
+    }
+    const saved = JSON.parse(readFileSync(join(f.dir, 'update.json'), 'utf8'));
+    expect(saved).toMatchObject({ current_revision: 'old', latest_revision: 'new', available: true, checked_at: 123 });
+  } finally { await stop(f, child); }
+}, 10000);
+
 for(const failure of ['exit','identity']) test(`real manager rejects Web startup ${failure} before activation`,async()=>{
   const f=fixture(),release=f.make('health');const entry=join(release.directory,'src/service/entry.ts');
   writeFileSync(entry,`

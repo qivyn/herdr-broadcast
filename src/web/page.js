@@ -1095,7 +1095,7 @@ function settingsView(main) {
       : !canUpdatePlugin(u) ? ["", ""]
       : u.available ? ["new", u.blocked_reason ? `${line}：${u.blocked_reason}` : line]
       : u.blocked_reason ? ["", u.blocked_reason]
-      : u.checked_at ? ["", `已是最新（${ago(u.checked_at)}检查）`] : ["", "还没有检查过更新"];
+      : u.checked_at ? ["", `暂无可升级的正式版本（${ago(u.checked_at)}检查）`] : ["", "还没有检查过更新"];
     const busy = checkingUpdate || updateInstalling || ["checking", "updating", "restarting"].includes(u.phase);
     restart.disabled = busy || !config.local;
     const where = !config.local ? "在这台电脑本机的浏览器里打开本页即可检查和更新" : null;

@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 // Fast component/helper tests. unit.test.ts also contains small SQLite/HTTP fixtures.
 // Everything else defaults to integration, so adding a test cannot silently omit it from CI.
-const unit = new Set(["unit.test.ts", "page.test.ts", "session-file.test.ts", "update-state.test.ts"]);
+const unit = new Set(["unit.test.ts", "page.test.ts", "session-file.test.ts", "update-state.test.ts", "release-policy.test.ts"]);
 const [suite, ...args] = process.argv.slice(2);
 if (suite !== "unit" && suite !== "integration") throw new Error("Usage: bun scripts/test-suite.ts unit|integration [bun test options]");
 const root = resolve(import.meta.dir, "..");

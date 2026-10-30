@@ -1,6 +1,6 @@
 id = "herdr-broadcast"
 name = "Broadcast"
-version = "0.3.0"
+version = "0.3.1"
 min_herdr_version = "0.9.5"
 description = "Send one prompt to many agents (existing or new, local or over SSH) from a web page, and watch every agent's screen as it works"
 platforms = ["linux", "macos"]

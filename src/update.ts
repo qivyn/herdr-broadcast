@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { herdrBin, herdrJson } from "./herdr.ts";
+import { latestRelease, type ReleaseFetch } from "./service/github-release.ts";
 import { checked, runCommand, type Run } from "./service/commands.ts";
 import { readJSON, type Release } from "./service/state.ts";
 import { describeRelease, snapshotSource, sourceHash, validateStage } from "./service/releases.ts";
@@ -30,6 +31,7 @@ export interface UpdaterOptions {
   publish: (status: UpdateStatus) => void;
   stateDir?: string; current?: Release; sourceRoot?: string;
   activate?: (release: Release, status: UpdateStatus) => Promise<void>;
+  fetch?: ReleaseFetch;
   plugins?: (signal?: AbortSignal) => Promise<InstalledPlugin[]>; run?: Run;
   persist?: (patch: Partial<UpdateStatus>, expected: UpdateGuard) => Promise<UpdateStatus>;
   validate?: (directory: string, run: Run, step: (s: string) => Promise<void>) => Promise<void>;
@@ -57,8 +59,12 @@ export class Updater implements UpdateController {
     this.cache = join(options.stateDir ?? ".", "update-cache.git");
     const saved = options.stateDir ? readJSON<UpdateStatus>(join(options.stateDir, "update.json")) : null;
     this.status = { ...emptyStatus(), ...saved, current_revision: options.current?.revision ?? null, current_version: options.current?.version ?? null };
+    // Saved branch-based results must not advertise an unpublished commit after migration.
+    if (saved?.kind === "github" && saved.latest_tag === undefined) Object.assign(this.status, {
+      available: false, latest_revision: null, latest_version: null, latest_tag: null, checked_at: null, blocked_reason: null,
+    });
     const journal = options.stateDir && !options.persist ? new UpdateJournal(options.stateDir) : null;
-    if (journal) this.status = journal.commit({ current_revision: this.status.current_revision, current_version: this.status.current_version });
+    if (journal) this.status = journal.commit(this.status);
     this.persist = options.persist ?? (async (patch, expected) => journal ? journal.commit(patch, expected) : { ...this.status, ...patch });
     if (!options.activate) this.status.blocked_reason = "请通过 Herdr 的 Broadcast 网页动作启动受管服务";
   }
@@ -106,7 +112,8 @@ export class Updater implements UpdateController {
     const github = self.source?.kind === "github";
     await this.patch({ kind: github ? "github" : self.source?.kind === "local" ? "local" : "unmanaged",
       root: self.plugin_root, source_revision: github ? self.source?.resolved_commit ?? null : null, source_version: github ? self.version ?? null : null,
-      ...(!github ? { available: false, latest_revision: null, latest_version: null, blocked_reason: null } : {}) });
+      ...(github && this.status.latest_tag === undefined ? { available: false, latest_revision: null, latest_version: null, latest_tag: null, checked_at: null, blocked_reason: null } : {}),
+      ...(!github ? { available: false, latest_revision: null, latest_version: null, latest_tag: null, blocked_reason: null } : {}) });
     return this.status;
   }
   async describe(): Promise<UpdateStatus> {
@@ -130,34 +137,58 @@ export class Updater implements UpdateController {
     const dirty = await checked(this.run, ["git", "status", "--porcelain", "--untracked-files=all"], root);
     if (!self.source.owner || !self.source.repo) throw new Error("Herdr 没有记录 GitHub 来源");
     this.origin = `https://github.com/${self.source.owner}/${self.source.repo}.git`;
-    const requested = self.source.requested_ref;
-    let ref = requested || "HEAD";
-    if (requested && !requested.startsWith("refs/heads/")) {
-      const branch = await checked(this.run, ["git", "ls-remote", "--heads", this.origin, requested]);
-      if (!branch) { await this.patch({ blocked_reason: "安装固定在 tag 或 commit；请通过 Herdr 显式更换版本", available: false }); return self; }
-      ref = `refs/heads/${requested}`;
+    this.target = null;
+    await this.patch({ available: false, latest_revision: null, latest_version: null, latest_tag: null });
+    const release = await latestRelease(self.source.owner, self.source.repo, this.cancellation.signal, this.options.fetch);
+    if (!release) {
+      await this.patch({ blocked_reason: "尚无正式 Release", checked_at: Date.now() });
+      return self;
     }
     mkdirSync(this.options.stateDir!, { recursive: true });
     if (!existsSync(this.cache)) await checked(this.run, ["git", "init", "--bare", this.cache]);
-    await checked(this.run, ["git", "fetch", "--no-tags", this.origin, ref], this.cache, 600_000);
-    this.target = await checked(this.run, ["git", "rev-parse", "FETCH_HEAD"], this.cache);
-    await checked(this.run, ["git", "fetch", "--no-tags", root, "HEAD"], this.cache, 60_000);
+    await checked(this.run, ["git", "fetch", "--no-tags", this.origin, `refs/tags/${release.tag}`], this.cache, 600_000);
+    this.target = await checked(this.run, ["git", "rev-parse", "FETCH_HEAD^{commit}"], this.cache);
+    const head = await checked(this.run, ["git", "rev-parse", "HEAD"], root);
     const current = this.options.current?.revision ?? this.sourceRevision;
-    const ancestor = async (a: string, b: string) => (await this.run(["git", "merge-base", "--is-ancestor", a, b], { cwd: this.cache, timeoutMs: 30_000 })).code === 0;
-    let available = this.target !== current;
+    const version = this.options.current?.version;
     let blocked: string | null = dirty ? "插件仓库有未提交的改动（包括未跟踪文件）：请先提交或移走" : null;
-    if (available && await ancestor(this.target, current!)) available = false;
-    else if (available && (!await ancestor(current!, this.target) || !await ancestor(this.sourceRevision, this.target))) blocked ??= "源码或运行版本与上游分叉，拒绝自动降级或覆盖";
-    const manifest = await checked(this.run, ["git", "show", `${this.target}:${self.source?.subdir ? self.source.subdir + "/" : ""}herdr-plugin.toml`], this.cache).catch(() => "");
+    if (head !== this.sourceRevision) blocked ??= "源码 HEAD 与 Herdr 登记的安装提交不一致，可能已分叉；拒绝覆盖本地提交";
+    // Fetch missing known commits from the origin, never import shallow boundaries from Herdr's checkout.
+    for (const revision of new Set([current, this.sourceRevision])) {
+      if ((await this.run(["git", "cat-file", "-e", `${revision}^{commit}`], { cwd: this.cache, timeoutMs: 30_000 })).code !== 0) {
+        const result = await this.run(["git", "fetch", "--no-tags", this.origin, revision!], { cwd: this.cache, timeoutMs: 60_000 });
+        if (result.code !== 0) blocked ??= "源码或运行版本与正式 Release 分叉，无法验证提交关系";
+      }
+    }
+    const ancestor = async (a: string, b: string) => {
+      const result = await this.run(["git", "merge-base", "--is-ancestor", a, b], { cwd: this.cache, timeoutMs: 30_000 });
+      if (result.code > 1) throw new Error("无法验证 Release 提交关系");
+      return result.code === 0;
+    };
+    let available = false;
+    if (!version || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version)) blocked ??= "无法确定运行版本，不能自动更新";
+    else available = this.target !== current && Bun.semver.order(release.version, version) > 0;
+    if (available && !blocked) {
+      if (await ancestor(this.target, current!)) available = false;
+      else if (!await ancestor(current!, this.target) || !await ancestor(this.sourceRevision, this.target)) blocked = "源码或运行版本与正式 Release 分叉，拒绝自动降级或覆盖";
+    }
+    const prefix = self.source.subdir ? self.source.subdir + "/" : "";
+    const manifest = Bun.TOML.parse(await checked(this.run, ["git", "show", `${this.target}:${prefix}herdr-plugin.toml`], this.cache)) as { id?: string; version?: string; events?: unknown[]; actions?: { id?: string }[] };
+    const pkg = JSON.parse(await checked(this.run, ["git", "show", `${this.target}:${prefix}package.json`], this.cache));
+    if (manifest.version !== release.version || pkg.version !== release.version) throw new Error("Release tag、插件清单与 package.json 版本不一致");
+    if (!manifest.id || ![manifest.id, `${self.source.owner}.${manifest.id}`].includes(self.plugin_id)) throw new Error("Release 插件身份与当前安装不一致");
     if (this.cancellation.signal.aborted) throw new Error("更新已取消");
-    if (/\[\[events\]\]|id\s*=\s*"worker"/.test(manifest)) blocked ??= "候选版本仍含旧 worker 或事件执行入口，不能自动切换";
-    await this.patch({ latest_revision: this.target, latest_version: /version\s*=\s*"([^"]+)"/.exec(manifest)?.[1] ?? null, available, blocked_reason: blocked, checked_at: Date.now() });
+    if (manifest.events?.length || manifest.actions?.some(a => a.id === "worker")) blocked ??= "候选版本仍含旧 worker 或事件执行入口，不能自动切换";
+    await this.patch({ latest_revision: this.target, latest_version: release.version, latest_tag: release.tag, available, blocked_reason: blocked, checked_at: Date.now() });
     return self;
   }
   async check() {
     if (this.activity === "checking") { await this.job; return this.status; }
     if (this.busy || this.cancelling || !this.options.activate) return this.status;
     const failure = this.status.outcome === "failed" ? this.status.error : null;
+    const previous = { available: this.status.available, latest_revision: this.status.latest_revision,
+      latest_version: this.status.latest_version, latest_tag: this.status.latest_tag,
+      blocked_reason: this.status.blocked_reason, checked_at: this.status.checked_at };
     this.activity = "checking";
     this.job = (async () => {
       try {
@@ -169,8 +200,8 @@ export class Updater implements UpdateController {
       }
       catch (e) {
         await this.patch(this.cancellation.signal.aborted
-          ? { phase: failure ? "error" : "idle", error: failure }
-          : { phase: "error", error: String((e as Error).message), checked_at: Date.now() });
+          ? { ...previous, phase: failure ? "error" : "idle", error: failure }
+          : { phase: "error", available: false, latest_revision: null, latest_version: null, latest_tag: null, error: String((e as Error).message), checked_at: Date.now() });
       }
     })().finally(() => { this.activity = "idle"; });
     await this.job;
@@ -206,7 +237,7 @@ export class Updater implements UpdateController {
       if (epoch !== this.epoch) throw new Error("更新已取消");
       await this.prepare(action);
     })().catch(async e => {
-      await this.patch({ phase: "error", step: null, outcome: "failed", available: (action === "install" && this.status.kind === "github") || this.status.available, error: String(e.message ?? e) });
+      await this.patch({ phase: "error", step: null, outcome: "failed", error: String(e.message ?? e) });
       this.activity = "idle";
     }).finally(() => { if (this.activity !== "switching") this.activity = "idle"; });
     return { ...this.status };
@@ -239,20 +270,26 @@ export class Updater implements UpdateController {
         if (!this.status.available) { await this.patch({ phase: "idle", step: null, outcome: "succeeded" }); return; }
         if (sourceHash(self.plugin_root) !== this.checkedSourceHash) throw new Error("准备期间源码发生变化，请重新检查");
         {
-          const requested = self.source.requested_ref;
-          const owner = self.source.owner, repo = self.source.repo;
-          await checked(this.run, [herdrBin(), "plugin", "update", self.plugin_id, "--yes"], undefined, 600_000);
+          const source = self.source, candidate = this.target!, tag = this.status.latest_tag!;
+          // Install the resolved commit: a moved tag or a newer release cannot change this operation's target.
+          const repository = `${source.owner}/${source.repo}${source.subdir ? "/" + source.subdir : ""}`;
+          const latest = await this.self();
+          if (latest.plugin_id !== self.plugin_id || latest.plugin_root !== self.plugin_root || JSON.stringify(latest.source) !== JSON.stringify(source)
+            || await checked(this.run, ["git", "rev-parse", "HEAD"], self.plugin_root) !== this.sourceRevision
+            || sourceHash(self.plugin_root) !== this.checkedSourceHash
+            || await checked(this.run, ["git", "status", "--porcelain", "--untracked-files=all"], self.plugin_root)) throw new Error("准备期间插件源码或安装来源发生变化");
+          await checked(this.run, [herdrBin(), "plugin", "install", repository, "--ref", candidate, "--yes"], undefined, 600_000);
           self = await this.self();
           const actual = self.source?.resolved_commit;
-          if (!actual || actual === this.options.current!.revision) throw new Error("Herdr 没有安装候选版本，请检查固定 ref");
-          if (self.source?.kind !== "github" || self.source.requested_ref !== requested || self.source.owner !== owner || self.source.repo !== repo) throw new Error("准备期间插件安装来源发生变化");
-          // The branch can advance while Herdr installs. Re-fetch its current target and verify
-          // the commit Herdr actually registered, instead of trusting the earlier check.
-          const candidate = this.target!;
-          await this.discover();
-          if (this.status.blocked_reason || (await this.run(["git", "merge-base", "--is-ancestor", candidate, actual], { cwd: this.cache, timeoutMs: 30_000 })).code !== 0
-            || (await this.run(["git", "merge-base", "--is-ancestor", actual, this.target!], { cwd: this.cache, timeoutMs: 30_000 })).code !== 0) throw new Error("Herdr 登记的版本与目标分支不一致");
+          if (actual !== candidate) throw new Error("Herdr 安装的提交与正式 Release 提交不一致");
+          if (self.plugin_id !== latest.plugin_id || self.source?.kind !== "github" || self.source.requested_ref !== candidate
+            || self.source.owner !== source.owner || self.source.repo !== source.repo || (self.source.subdir ?? null) !== (source.subdir ?? null)) throw new Error("准备期间插件安装来源发生变化");
+          if (await checked(this.run, ["git", "rev-parse", "HEAD"], self.plugin_root) !== candidate
+            || await checked(this.run, ["git", "status", "--porcelain", "--untracked-files=all"], self.plugin_root)) throw new Error("已安装源码与正式 Release 提交不一致");
+          await this.describePlugin(self);
+          await this.patch({ latest_revision: candidate, latest_tag: tag });
           next = await snapshotSource(self.plugin_root, this.options.stateDir!, this.run); stage = next.directory;
+          if (next.sourceRevision !== candidate || next.version !== this.status.latest_version) throw new Error("运行快照与正式 Release 不一致");
           next.revision = actual;
         }
         await (this.options.validate ?? validateStage)(stage!, this.run, step => this.patch({ step }));
