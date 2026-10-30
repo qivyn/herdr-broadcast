@@ -6,6 +6,7 @@ export interface UpdateStatus {
   action?: "apply" | "install" | "restart" | null;
   current_version: string | null; current_revision: string | null;
   latest_version: string | null; latest_revision: string | null;
+  latest_tag?: string | null;
   available: boolean; phase: UpdatePhase; blocked_reason: string | null; error: string | null; checked_at: number | null;
   source_revision?: string | null; source_version?: string | null;
   step?: string | null; operation_id?: string | null;

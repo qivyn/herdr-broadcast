@@ -1135,9 +1135,9 @@ describe("machines page", () => {
     }
   });
 
-  test("checking says it is up to date; a blocked update says why and offers no install", async () => {
+  test("checking reports no newer stable release; a blocked update says why and offers no install", async () => {
     const h = machinesHarness({ settings: true, update: { kind: "github", current_version: "0.3.0", current_revision: "c".repeat(40), available: false, phase: "idle", blocked_reason: null, checked_at: 1 } });
-    expect(h.text()).toContain("已是最新");
+    expect(h.text()).toContain("暂无可升级的正式版本");
     await h.buttons("检查更新")[0]!.events.click!();
     expect(h.requests.map(r => r.path)).toEqual(["/api/update/check"]);
     const blocked = machinesHarness({ settings: true, update: { kind: "github", current_version: "0.3.0", available: true, latest_version: "0.3.1", phase: "idle", blocked_reason: "插件仓库有未提交的改动", checked_at: 1 } });
@@ -1147,6 +1147,14 @@ describe("machines page", () => {
     const remote = machinesHarness({ settings: true, local: false, update: { kind: "github", current_version: "0.3.0", available: true, latest_version: "0.3.1", phase: "idle", blocked_reason: null, checked_at: 1 } });
     expect(remote.buttons("检查更新")[0]!.disabled).toBe(true);
     expect(remote.buttons("更新并重启")).toHaveLength(0);
+  });
+  test("a repository without a full release explains why no update is offered", () => {
+    const h = machinesHarness({ settings: true, update: { kind: "github", current_version: "0.3.0", available: false,
+      latest_tag: null, latest_revision: null, latest_version: null, phase: "idle", checked_at: 1, blocked_reason: "尚无正式 Release" } });
+    expect(h.text()).toContain("尚无正式 Release");
+    expect(h.buttons("更新并重启")).toHaveLength(0);
+    expect(h.buttons("检查更新")).toHaveLength(1);
+    h.view.dispose?.();
   });
 });
 

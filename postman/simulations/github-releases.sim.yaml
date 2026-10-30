@@ -1,0 +1,8 @@
+simulation: github-releases
+routing: path
+mocks:
+  - name: GitHub Releases
+    routeKey: github
+    origin:
+      - api.github.com
+    path: postman/mocks/github-releases

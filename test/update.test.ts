@@ -24,7 +24,7 @@ async function fixture() {
   const first = await release(dev, "0.3.0"); await git(dev, "push", "-qu", "origin", "main"); await git(dir, "clone", "-q", origin, root);
   cpSync(root, runtime, { recursive: true });
   const current: Release = { directory: runtime, sourceRoot: root, revision: first, sourceRevision: first, sourceHash: sourceHash(root), hash: sourceHash(runtime), protocol: 1, schema: 9, version: "0.3.0" };
-  const next = await release(dev, "0.3.1"); await git(dev, "push", "-q");
+  const next = await release(dev, "0.3.1"); await git(dev, "tag", "-a", "v0.3.1", "-m", "release"); await git(dev, "push", "-q", "--tags"); await git(dev, "push", "-q");
   const activated: Release[] = [], calls: string[][] = [], order: string[] = [];
   const options: UpdaterOptions = { stateDir, current, publish() {}, validate: async () => { order.push("validate"); },
     plugins: async () => [{ plugin_id: "herdr-broadcast", plugin_root: root, version: "0.3.0", source: { kind: "local" } }],
@@ -40,15 +40,18 @@ async function fixture() {
 }
 function github(f: Awaited<ReturnType<typeof fixture>>, requestedRef: string | null = "main") {
   let installed = false, nativeUpdates = 0;
+  let releaseData: unknown = { tag_name: "v0.3.1", draft: false, prerelease: false, published_at: "2026-10-30T00:00:00Z" };
+  const installs: string[][] = [];
   const options: UpdaterOptions = { ...f.options,
-    plugins: async () => [{ plugin_id: "qivyn.herdr-broadcast", plugin_root: installed ? f.dev : f.root, version: installed ? "0.3.1" : "0.3.0",
-      source: { kind: "github", owner: "test", repo: "broadcast", requested_ref: requestedRef, resolved_commit: installed ? f.next : f.first } }],
+    fetch: async url => String(url).endsWith("/releases/latest") ? releaseData === null ? new Response(null, { status: 404 }) : Response.json(releaseData) : Response.json({ id: 1 }),
+    plugins: async () => [{ plugin_id: "test.herdr-broadcast", plugin_root: installed ? f.dev : f.root, version: installed ? "0.3.1" : "0.3.0",
+      source: { kind: "github", owner: "test", repo: "broadcast", requested_ref: installed ? f.next : requestedRef, resolved_commit: installed ? f.next : f.first } }],
     run: async (argv, opts) => {
-      if (argv[1] === "plugin" && argv[2] === "update") { nativeUpdates++; installed = true; return { code: 0, stdout: "", stderr: "" }; }
+      if (argv[1] === "plugin" && ["update", "install"].includes(argv[2]!)) { installs.push(argv); nativeUpdates++; installed = true; return { code: 0, stdout: "", stderr: "" }; }
       return f.options.run!(argv.map(a => a === "https://github.com/test/broadcast.git" ? f.origin : a), opts);
     },
   };
-  return { options, installed: () => installed, nativeUpdates: () => nativeUpdates };
+  return { options, installed: () => installed, nativeUpdates: () => nativeUpdates, installs, setRelease: (value: unknown) => { releaseData = value; } };
 }
 
 test("local checks use the checkout only, even when its upstream has a newer version", async () => {
@@ -149,15 +152,74 @@ test("diverged GitHub histories still refuse automatic installation", async () =
   const f = await fixture(); const revision = await release(f.root, "0.4.0-local");
   const u = new Updater({ ...github(f).options, current: { ...f.current, revision } }); expect((await u.check()).blocked_reason).toContain("分叉");
 });
-for (const ref of ["v0.3.0", "abcdef0123456789"]) test(`fixed GitHub ref ${ref} never falls back to the default branch`, async () => {
-  const f = await fixture(), g = github(f, ref), u = new Updater(g.options);
-  expect((await u.check()).blocked_reason).toContain("固定"); expect(f.calls.some(a => a.includes("fetch"))).toBe(false);
+test("clean installation HEAD differing from its registered commit blocks replacement", async () => {
+  const f = await fixture(); await release(f.root, "0.3.0-local");
+  expect(await git(f.root, "status", "--porcelain")).toBe("");
+  const g = github(f), u = new Updater(g.options);
+  expect((await u.check()).blocked_reason).not.toBeNull();
+  await u.install(); await u.wait();
+  expect(g.nativeUpdates()).toBe(0); expect(f.activated).toEqual([]);
 });
-for (const ref of [null, "main", "refs/heads/main"]) test(`GitHub branch ${ref ?? "default"} uses native installation and preserves local checkout`, async () => {
+for (const ref of [null, "main", "refs/heads/main", "v0.3.0", "abcdef0123456789"]) test(`GitHub installation ${ref ?? "default"} follows published releases and installs the exact commit`, async () => {
   const f = await fixture(), g = github(f, ref), u = new Updater(g.options), refs = await git(f.root, "show-ref");
-  expect(await u.check()).toMatchObject({ kind: "github", available: true, latest_revision: f.next });
+  expect(await u.check()).toMatchObject({ kind: "github", available: true, latest_revision: f.next, latest_tag: "v0.3.1" });
   await u.install(); await u.wait(); expect(g.nativeUpdates()).toBe(1); expect(f.activated[0]!.revision).toBe(f.next);
+  expect(g.installs[0]!.slice(1)).toEqual(["plugin", "install", "test/broadcast", "--ref", f.next, "--yes"]);
   expect(await git(f.root, "show-ref")).toBe(refs); expect(f.order).not.toContain("link");
+});
+test("unreleased commits are never offered or installed", async () => {
+  const f = await fixture(), g = github(f); g.setRelease(null);
+  const u = new Updater(g.options);
+  expect(await u.check()).toMatchObject({ available: false, latest_revision: null, latest_version: null, latest_tag: null, blocked_reason: "尚无正式 Release", phase: "idle" });
+  await u.install(); await u.wait(); expect(g.nativeUpdates()).toBe(0); expect(f.activated).toEqual([]);
+});
+test("a branch beyond a release is not the update target", async () => {
+  const f = await fixture(), g = github(f); await release(f.dev, "0.4.0"); await git(f.dev, "push", "-q");
+  expect(await new Updater(g.options).check()).toMatchObject({ latest_revision: f.next, latest_version: "0.3.1" });
+});
+for (const version of ["0.3.1", "0.4.0"]) test(`published release does not replace same or newer runtime version ${version}`, async () => {
+  const f = await fixture(), g = github(f), u = new Updater({ ...g.options, current: { ...f.current, version } });
+  expect((await u.check()).available).toBe(false);
+  await u.install(); await u.wait(); expect(g.nativeUpdates()).toBe(0);
+});
+for (const patch of [{ draft: true }, { prerelease: true }, { published_at: null }, { tag_name: "v0.4.0-rc.1" }]) test(`invalid stable release is refused: ${JSON.stringify(patch)}`, async () => {
+  const f = await fixture(), g = github(f); g.setRelease({ tag_name: "v0.3.1", draft: false, prerelease: false, published_at: "2026-10-30T00:00:00Z", ...patch });
+  const u = new Updater(g.options); expect(await u.check()).toMatchObject({ phase: "error", available: false });
+  await u.install(); await u.wait(); expect(g.nativeUpdates()).toBe(0);
+});
+test("release tag must match package and plugin versions", async () => {
+  const f = await fixture(); await git(f.dev, "tag", "v0.4.0"); await git(f.dev, "push", "-q", "--tags");
+  const g = github(f); g.setRelease({ tag_name: "v0.4.0", draft: false, prerelease: false, published_at: "2026-10-30T00:00:00Z" });
+  const u = new Updater(g.options); expect((await u.check()).error).toContain("版本不一致");
+  await u.install(); await u.wait(); expect(g.nativeUpdates()).toBe(0);
+});
+test("installation rejects a different actual commit even if it descends from the release", async () => {
+  const f = await fixture(), g = github(f), advanced = await release(f.dev, "0.4.0"); await git(f.dev, "push", "-q");
+  const u = new Updater({ ...g.options, plugins: async () => (await g.options.plugins!()).map(p => g.installed() ? { ...p, source: { ...p.source, resolved_commit: advanced } } : p) });
+  await u.install(); await u.wait(); expect(u.status.error).toContain("提交不一致"); expect(f.activated).toEqual([]);
+});
+test("a failed release check clears stale update availability", async () => {
+  const f = await fixture(), g = github(f); let fail = false;
+  const u = new Updater({ ...g.options, fetch: (url, init) => fail ? Promise.resolve(new Response(null, { status: 503 })) : g.options.fetch!(url, init) });
+  expect((await u.check()).available).toBe(true); fail = true;
+  expect(await u.check()).toMatchObject({ phase: "error", available: false, latest_revision: null });
+});
+test("Herdr's shallow installed checkout still permits a newer release", async () => {
+  const f = await fixture(); rmSync(f.root, { recursive: true });
+  await git(dir, "init", "-q", f.root);
+  await git(f.root, "fetch", "--depth", "1", f.origin, f.first);
+  await git(f.root, "checkout", "--detach", "FETCH_HEAD");
+  expect(await git(f.root, "rev-parse", "--is-shallow-repository")).toBe("true");
+  expect(await new Updater(github(f).options).check()).toMatchObject({ available: true, blocked_reason: null });
+});
+test("launcher-owned legacy branch status is cleared when describing the GitHub source", async () => {
+  const { UpdateJournal } = await import("../src/service/update-state.ts");
+  const f = await fixture(), g = github(f), journal = new UpdateJournal(f.stateDir);
+  journal.commit({ kind: "github", available: true, latest_revision: f.next, latest_version: "0.3.1", checked_at: 123 });
+  const u = new Updater({ ...g.options, persist: async (patch, guard) => journal.commit(patch, guard) });
+  u.status = journal.status; // Managers receive the launcher's persisted status on activation.
+  expect(await u.describe()).toMatchObject({ available: false, latest_revision: null, latest_tag: null, checked_at: null });
+  expect(journal.status.available).toBe(false);
 });
 test("GitHub records newer than the runtime remain retryable after validation failure", async () => {
   const f = await fixture(), g = github(f); let fail = true;
@@ -199,6 +261,23 @@ test("validation refreshes generated browser assets from staged dependencies", a
 });
 
 function gate() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
+
+test("restart interrupting a release check preserves the previous known update", async () => {
+  const f = await fixture(), g = github(f), entered = gate(); let hold = false;
+  const u = new Updater({ ...g.options, fetch: async (url, init) => {
+    if (hold) {
+      entered.resolve();
+      await new Promise<void>(resolve => init!.signal!.addEventListener("abort", () => resolve(), { once: true }));
+      throw new Error("cancelled request");
+    }
+    return g.options.fetch!(url, init);
+  } });
+  expect((await u.check()).available).toBe(true); hold = true;
+  const checking = u.check(); await entered.promise;
+  await u.restart(); await checking; await u.wait();
+  expect(u.status).toMatchObject({ available: true, latest_revision: f.next, latest_tag: "v0.3.1" });
+  expect(f.activated).toEqual([f.current]);
+});
 
 test("cancel waits for plugin discovery, ignores its late result and leaves restart usable", async () => {
   const f = await fixture(), entered = gate(), finish = gate(); let signal: AbortSignal | undefined;

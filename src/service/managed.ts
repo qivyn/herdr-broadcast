@@ -193,7 +193,7 @@ export async function runLauncher(database: string, dir: string, initial: Releas
       const activating = status({ ...update, step: "activating", current_revision: next.revision, current_version: next.version });
       await requestChild(candidate, "activate", activating);
       active = next; saveRuntime(dir, { current: next, previous: retained });
-      const done = status({ phase: "idle", step: null, outcome: "succeeded", available: false, error: null });
+      const done = status({ phase: "idle", step: null, outcome: "succeeded", available: next.directory === previous.directory ? update.available : false, error: null });
       writer = candidate;
       await requestChild(candidate, "confirm", done);
       pruneReleases(dir);
@@ -204,7 +204,7 @@ export async function runLauncher(database: string, dir: string, initial: Releas
           await stopPaused(manager);
         }
         manager = await launch(previous); active = previous;
-        const failed = { ...update, phase: "error" as const, step: null, outcome: "failed" as const, available: update.kind === "github" && update.action === "install", current_revision: previous.revision, current_version: previous.version, error: `操作失败，已恢复旧版：${String((e as Error).message)}` };
+        const failed = { ...update, phase: "error" as const, step: null, outcome: "failed" as const, current_revision: previous.revision, current_version: previous.version, error: `操作失败，已恢复旧版：${String((e as Error).message)}` };
         saveRuntime(dir, { current: previous, previous: previousRuntime });
         status(failed); writer = manager;
         await requestChild(manager, "activate", failed); pruneReleases(dir);
