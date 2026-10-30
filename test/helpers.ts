@@ -20,6 +20,8 @@ export interface FakeAgent {
 }
 
 export interface FakeServer {
+  processes?: Record<string, { pid: number; name: string }[]>;
+  exitAfterPaste?: boolean;
   omitSessionReports?: boolean;
   next: number;
   workspaces: { workspace_id: string; label: string; active_tab_id: string }[];
@@ -35,6 +37,7 @@ export interface FakeServer {
   promptReply?: Partial<FakeAgent> | null;
   promptRefusalSession?: FakeAgent["agent_session"];
   startDelayMs?: number;
+  startScreen?: string;
   missingKinds?: string[];
   screens?: Record<string, string>;
 }
@@ -170,3 +173,6 @@ export async function until(check: () => boolean, timeoutMs = 8_000, what = "con
   }
   throw new Error(`timed out waiting for ${what}`);
 }
+
+/** Launch policy fixture: real target capability probing has its own tests. */
+export const fakeLaunchArgs = async (_machine: string, kind: string, args: string[] = []) => kind === "codex" ? ["--no-daemon", ...args] : args;

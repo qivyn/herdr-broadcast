@@ -76,7 +76,9 @@ test("closing browser streams leaves an accepted send running; snapshots and ref
     for (const c of streams) { const r = await fetch(web.url + "api/events", { signal: c.signal }); await r.body!.getReader().read(); }
     const r = await post(web.url, "api/broadcasts", { prompt: "after close", targets: [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }] });
     expect(r.ok).toBe(true); streams.forEach(c => c.abort());
-    await web.engine.settle();
+    const { id } = await r.json() as any;
+    await until(() => store.executions(id)[0]?.state === "sent");
+    expect(web.engine.identityPending(store.executions(id)[0]!.id)).toBe(true);
     await Promise.all(Array.from({ length: 8 }, () => fetch(web.url + "api/state")));
     expect(fake.server().prompts).toEqual([{ pane_id: a.pane_id, text: "after close" }]);
   } finally { streams.forEach(c => c.abort()); await web.stop(); store.close(); fake.cleanup(); }
@@ -139,10 +141,12 @@ test("history deletion waits for delivery and never retracts a message from the 
     expect((await remove()).status).toBe(409);
     const e = store.executions(id)[0]!;
     expect((await post(web.url, `api/executions/${e.id}/cancel`, {})).status).toBe(410);
-    await web.engine.settle();
+    await until(() => store.execution(e.id)?.state === "sent");
     const snapshot = await (await fetch(web.url + "api/state")).json() as any;
     expect(snapshot.state.broadcasts[0].executions[0]).toMatchObject({ state: "sent", agent_status: "working" });
     expect((await remove()).status).toBe(200); expect(store.getBroadcast(id)).toBeNull();
+    await web.engine.settle();
+    expect(web.engine.identityPending(e.id)).toBe(false);
     expect(fake.server().prompts.map(p => p.text)).toEqual(["keep in agent"]);
     expect(fake.server().agents).toHaveLength(1);
   } finally { await web.stop(); store.close(); fake.cleanup(); }

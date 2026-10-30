@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { AGENTS } from "../src/agents.ts";
 import { readFileSync } from "node:fs";
 import { ACTIVE_STATES, Store, type Execution } from "../src/db.ts";
 import { resumeIdentityIssue, terminalBindingKey } from "../src/conversation-target.ts";
 import { Engine } from "../src/engine.ts";
 import { Conversations, continuationInfo, continuationKey, resumeArgs } from "../src/continuation.ts";
 import { startWebServer } from "../src/web/server.ts";
-import { FakeHerdr, until } from "./helpers.ts";
+import { fakeLaunchArgs, FakeHerdr, until } from "./helpers.ts";
 import { snapshot } from "../src/web/server.ts";
 import { slugOf } from "../src/weblink.ts";
 
@@ -14,7 +15,7 @@ let fake: FakeHerdr, store: Store, engine: Engine, conversations: Conversations;
 let web: ReturnType<typeof startWebServer> | undefined;
 beforeEach(() => {
   fake = new FakeHerdr(); store = new Store(fake.dbFile);
-  engine = new Engine(store, () => {}, {});
+  engine = new Engine(store, () => {}, { identityWaitMs: 0 }, fakeLaunchArgs);
   conversations = new Conversations(store, engine, () => {}, async () => true, async () => ({ status: "none" }));
 });
 afterEach(async () => {
@@ -58,6 +59,7 @@ for (const state of ["sent", "uncertain", "completed"] as const) test(`${state} 
   expect(store.execution(e.id)).toEqual(e);
   await expect(conversations.confirmSession(e, "stale-terminal")).rejects.toThrow("终端已变化");
   await conversations.confirmSession(e, e.terminal_id);
+  expect(store.continuation(`identity:${e.id}`)?.identity_source).toBe("manual");
   const confirmed = store.execution(e.id)!;
   expect(confirmed).toMatchObject({ state, session_kind: "id", session_value: session, sent_at: e.sent_at, finished_at: e.finished_at });
   expect((await new Conversations(store, engine, () => {}).target(confirmed))?.mode).toBe("reconnect");
@@ -403,7 +405,7 @@ describe("continue a broadcast conversation", () => {
     expect(resumed.terminal_state).toBe("live");
     expect(resumed.execution.pane_id).not.toBe(e.pane_id);
     store.close(); store = new Store(fake.dbFile);
-    engine = new Engine(store, () => {}, {});
+    engine = new Engine(store, () => {}, { identityWaitMs: 0 }, fakeLaunchArgs);
     await engine.refreshMachines();
     conversations = new Conversations(store, engine, () => {}, async () => true, async () => ({ status: "none" }));
     expect((await conversations.continue(e)).mode).toBe("reconnect");
@@ -415,7 +417,7 @@ describe("continue a broadcast conversation", () => {
     const e = await fixture("codex", "m-1"); close(e);
     expect((await conversations.continue(e)).mode).toBe("resumed");
     expect(starts()[0]).toStartWith("m-1 ");
-    expect(starts()[0]).toContain(`"--","resume","${session}"`);
+    expect(starts()[0]).toContain(`"--","--no-daemon","resume","${session}"`);
     expect(fake.server("m-1").agents[0]!.cwd).toBe(e.cwd!);
     expect(fake.server("local").agents).toHaveLength(0);
     expect(fake.server("m-1").prompts).toEqual([]);
@@ -554,7 +556,7 @@ test("session pickers work for Claude and Codex and never fall back to the most 
     store.update(e.id, { session_kind: null, session_value: null });
     const saved = store.execution(e.id)!; close(saved);
     expect((await conversations.continue(saved, true)).mode).toBe("choose");
-    expect(starts().at(-1)).toContain(kind === "claude" ? '"--","--resume"]' : '"--","resume"]');
+    expect(starts().at(-1)).toContain(kind === "claude" ? '"--","--resume"]' : '"--","--no-daemon","resume"]');
   }
   expect(starts().join("\n")).not.toContain("--last");
   expect(starts().join("\n")).not.toContain("--continue");
@@ -572,10 +574,17 @@ test("a picker that is not idle yet remains inspectable without launching duplic
   expect(continuationInfo(store, engine, saved).terminal_state).toBe("restoring");
 });
 
-test("an unsupported picker and an unavailable machine do not launch agents", async () => {
+test("a kind without a picker opens a manual terminal; an unavailable machine cannot launch", async () => {
   const e = await fixture("gemini", "m-1"); close(e);
   store.update(e.id, { session_kind: null, session_value: null });
-  await expect(conversations.continue(store.execution(e.id)!, true)).rejects.toThrow("暂不支持");
+  expect((await conversations.continue(store.execution(e.id)!, true)).mode).toBe("manual");
+  expect(store.continuation(continuationKey(store.execution(e.id)!))).toMatchObject({ manual_required: true, status: "uncertain" });
+  expect(fake.server("m-1").prompts).toEqual([]);
+  const first = store.continuation(continuationKey(store.execution(e.id)!))!;
+  fake.mutate(s => { s.servers["m-1"]!.panes = s.servers["m-1"]!.panes.filter(p => p.pane_id !== first.pane_id); });
+  await engine.refresh("m-1");
+  expect(continuationInfo(store, engine, store.execution(e.id)!)).toMatchObject({ can_resume: true, resume_mode: "manual" });
+  expect((await conversations.continue(store.execution(e.id)!)).mode).toBe("manual");
   store.update(e.id, { agent_kind: "pi" });
   fake.mutate((s) => { s.servers["m-1"]!.unreachable = true; });
   await expect(conversations.continue(store.execution(e.id)!, true)).rejects.toThrow("ssh");
@@ -976,4 +985,31 @@ test("a native missing-session failure becomes an unrecoverable outcome instead 
   expect((await conversations.continue(e)).mode).toBe("inspect");
   expect(continuationInfo(store, engine, e)).toMatchObject({ terminal_state: "closed", can_resume: false, restore_unavailable: true });
   expect(fake.server().prompts).toEqual([]); expect(store.execution(e.id)).toEqual(e);
+});
+
+for (const capability of AGENTS) {
+  test(`${capability.kind} restores the exact native identifier without submitting history`, async () => {
+    const original = await fixture(capability.kind);
+    const value = `${capability.kind}_native-123`;
+    store.update(original.id, { session_kind: "id", session_value: value });
+    const e = store.execution(original.id)!;
+    close(e);
+    const results = await Promise.all([conversations.continue(e), conversations.continue(e)]);
+    expect(results.every(r => r.mode === "resumed")).toBe(true);
+    expect(starts()).toHaveLength(1);
+    expect(fake.server().agents.at(-1)?.agent_session?.value).toBe(value);
+    expect(fake.server().prompts).toEqual([]);
+  });
+}
+
+test("OMP path restoration checks readability before opening a terminal", async () => {
+  const original = await fixture("omp"); close(original);
+  store.update(original.id, { session_kind: "path", session_value: "/tmp/missing history.jsonl" });
+  const e = store.execution(original.id)!;
+  const unavailable = new Conversations(store, engine, () => {}, async () => false);
+  await expect(unavailable.continue(e)).rejects.toThrow("会话文件");
+  expect(starts()).toHaveLength(0);
+  const available = new Conversations(store, engine, () => {}, async () => true);
+  expect((await available.continue(e)).mode).toBe("resumed");
+  expect(starts()[0]).toContain("--resume=/tmp/missing history.jsonl");
 });

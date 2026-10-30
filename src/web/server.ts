@@ -23,10 +23,12 @@ import { TerminalBridge, terminalGeometry, type TerminalSocketData } from "./ter
 import { AddJobs } from "./add-job.ts";
 import { addCommand, checkTarget, configEntry, generateKey, localHerdrVersion, localKey, openAddTerminal, parseMachineStatus, parseSession, parseTarget, suggestEntryName, tightenKey, trustHostKey, verifyLogin, webUiMachines, writeConfigEntry, type MachineHealth } from "./ssh.ts";
 import { sanitizeKeepStyle } from "../text.ts";
-import { AGENT_KINDS, validCwd } from "../agents.ts";
+import { AGENTS, AGENT_KINDS, DEFAULT_AGENT_KINDS, validCwd } from "../agents.ts";
+import { AgentEnvironments, type EnvironmentRunner } from "../agent-environment.ts";
+import { confirmManual, manualBindingKey, manualValid, refreshManual } from "../manual-session.ts";
 import { DEFAULT_WEB_URL, webLinkQuery } from "../weblink.ts";
 import { Conversations, continuationInfo, RestoreUnavailableError } from "../continuation.ts";
-import { resumeIdentityIssue } from "../conversation-target.ts";
+import { continuationKey, resumeIdentityIssue } from "../conversation-target.ts";
 
 export const WEB_LOCK = "web";
 export const DEFAULT_WEB_PORT = 7318;
@@ -159,6 +161,12 @@ export function snapshot(store: Store, engine: Engine) {
         agent_status: liveAgent?.agent_status ?? null,
         agent_name: liveAgent ? liveAgent.name ?? null : e.agent_name, cwd: e.cwd, pane_id: e.pane_id, workspace_label: e.workspace_label, state: e.state,
         note: e.note, error: e.error, session_kind: e.session_kind, session_value: e.session_value, sent_at: e.sent_at, finished_at: e.finished_at,
+        manual_session: store.continuation(continuationKey(e))?.manual_required === true || e.agent_kind === "custom",
+        identity_state: e.session_value ? "native" : engine.identityPending(e.id) ? "pending"
+          : store.continuation(continuationKey(e))?.manual_required || e.agent_kind === "custom"
+            || store.continuation(continuationKey(e))?.confirmed_session ? info.terminal_state === "live" ? "manual" : "unknown" : "unknown",
+        identity_source: store.continuation(`identity:${e.id}`)?.identity_source ?? (e.agent_kind === "custom" ? "manual" : null),
+        identity_check: store.continuation(`identity:${e.id}`)?.identity_check ?? null,
         terminal_id: e.terminal_id, terminal_state: info.terminal_state, can_resume: info.can_resume, resume_reason: info.resume_reason, resume_mode: info.resume_mode,
         requires_action: info.requires_action === true,
         can_rename: info.terminal_state === "live" && !!(liveAgent?.agent ?? liveAgent?.display_agent),
@@ -167,10 +175,10 @@ export function snapshot(store: Store, engine: Engine) {
         restore_kind: info.restore_kind,
         restore_pending: info.restore_pending === true,
         restore_unavailable: info.restore_unavailable === true,
-        needs_start_confirmation: ["starting", "failed"].includes(e.state) && liveAgent?.agent_status === "blocked" && !e.sent_at,
+        needs_start_confirmation: engine.canCancelStartup(e.id) || (["starting", "failed"].includes(e.state) && liveAgent?.agent_status === "blocked" && !e.sent_at),
         can_cancel_start: engine.canCancelStartup(e.id),
         can_auto_resume: false, // compatibility for older pages; process launches always require a click
-        can_follow_up: info.terminal_state === "live" && !!(liveAgent?.agent ?? liveAgent?.display_agent),
+        can_follow_up: info.terminal_state === "live" && (store.continuation(continuationKey(e))?.manual_required || e.agent_kind === "custom" || !!(liveAgent?.agent ?? liveAgent?.display_agent)),
         can_retry: !store.retryRound(original.id) && ["failed", "uncertain", "cancelled", "lost", "interrupted"].includes(e.state) && (info.terminal_state === "live" || (["not_started", "shell"].includes(info.terminal_state) && e.target_kind === "new")),
         retry_round_number: store.retryRound(original.id)?.number ?? null,
         web_link: e.pane_id ? webLinkQuery({ machineId: e.machine_id, workspaceId: e.workspace_id, workspaceLabel: e.workspace_label, paneId: e.pane_id }) : null,
@@ -204,6 +212,7 @@ export function agentsSnapshot(_store: Store, engine: Engine) {
       loading: !view || view.at === 0,
       error: view?.error ?? null,
       folders,
+      terminals: (view?.panes ?? []).map(p => ({ ...p, bound: !!_store.continuation(manualBindingKey(m.id, p.terminal_id)) && manualValid(m.id, _store.continuation(manualBindingKey(m.id, p.terminal_id))!) })),
       agents: agents.map((a) => ({
         pane_id: a.pane_id, terminal_id: a.terminal_id, kind: a.agent ?? a.display_agent ?? "agent", name: a.name ?? null, status: a.agent_status, ready: READY.includes(a.agent_status),
         session_kind: a.agent_session?.kind ?? null, session_value: a.agent_session?.value ?? null,
@@ -216,7 +225,7 @@ export function agentsSnapshot(_store: Store, engine: Engine) {
 interface NewBroadcastBody {
   title?: unknown;
   prompt?: unknown;
-  targets?: { machine?: unknown; pane?: unknown; terminal_id?: unknown; agent_kind?: unknown; session_kind?: unknown; session_value?: unknown }[];
+  targets?: { machine?: unknown; pane?: unknown; terminal_id?: unknown; agent_kind?: unknown; session_kind?: unknown; session_value?: unknown; manual?: unknown }[];
   new?: { machine?: unknown; kind?: unknown; cwd?: unknown; count?: unknown }[];
 }
 
@@ -226,6 +235,15 @@ export function executionsFrom(body: NewBroadcastBody, engine: Engine): NewExecu
   for (const target of body.targets ?? []) {
     const machine = engine.machine(String(target.machine ?? ""));
     if (!machine) throw new Error(`没有这台机器：${String(target.machine)}`);
+    if (target.manual === true) {
+      const pane = engine.view(machine.id)?.panes.find(p => p.pane_id === target.pane && p.terminal_id === target.terminal_id);
+      const key = manualBindingKey(machine.id, String(target.terminal_id));
+      const binding = engine.store.continuation(key);
+      if (!pane || !binding || !manualValid(machine.id, binding)) throw new Error("请先明确确认自定义 agent 的终端，进程变化后需重新绑定");
+      executions.push({ machine_id: machine.id, machine_label: machine.label, target_kind: "existing", agent_kind: "custom", agent_name: "自定义 agent",
+        ...pane, cwd: pane.cwd, continuation_source: key, workspace_label: binding.workspace_label });
+      continue;
+    }
     const agent = engine.view(machine.id)?.agents.find((a) => a.pane_id === target.pane);
     if (!agent) throw new Error(`${machine.label} 上已经没有 ${String(target.pane)} 这个 agent`);
     if (typeof target.terminal_id !== "string" || target.terminal_id !== agent.terminal_id
@@ -277,11 +295,11 @@ async function screenOf(e: Execution): Promise<string> {
   }
 }
 
-export function startWebServer(store: Store, options: WebOptions = webOptions(), timing?: ConstructorParameters<typeof Engine>[2], updates?: Partial<UpdaterOptions> | UpdateController) {
+export function startWebServer(store: Store, options: WebOptions = webOptions(), timing?: ConstructorParameters<typeof Engine>[2], updates?: Partial<UpdaterOptions> | UpdateController, environmentRunner?: EnvironmentRunner) {
   const engine = new Engine(store, () => {}, timing);
   if (options.paused) engine.pause();
   try {
-    const web = serve(store, engine, options, updates);
+    const web = serve(store, engine, options, updates, environmentRunner);
     engine.start();
     return web;
   } catch (error) {
@@ -291,7 +309,7 @@ export function startWebServer(store: Store, options: WebOptions = webOptions(),
   }
 }
 
-function serve(store: Store, engine: Engine, options: WebOptions, updates: Partial<UpdaterOptions> | UpdateController = {}) {
+function serve(store: Store, engine: Engine, options: WebOptions, updates: Partial<UpdaterOptions> | UpdateController = {}, environmentRunner?: EnvironmentRunner) {
   const page = readFileSync(join(import.meta.dir, "page.html"), "utf8");
   const script = readFileSync(join(import.meta.dir, "page.js"), "utf8");
   const icon = readFileSync(join(import.meta.dir, "icon.svg"), "utf8");
@@ -309,8 +327,9 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
   let lastPushed = "";
   let webUi: WebUiStatus = { installed: false, running: false };
   const updater: UpdateController = "status" in updates ? updates : new Updater({ publish: () => push(), ...updates });
+  const environments = new AgentEnvironments(`${store.path}.agent-environment.json`, () => push(), environmentRunner);
   const payload = () => JSON.stringify({ app: "herdr-broadcast", state: snapshot(store, engine), agents: agentsSnapshot(store, engine), webUi,
-    update: updater.status, build });
+    update: updater.status, build, environments: [...environments.snapshots.values()], environmentOperations: environments.list() });
   const checkWebUi = async () => {
     webUi = await detectWebUi();
     push();
@@ -458,6 +477,7 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
 
   // Only start background work after the HTTP port has been bound successfully.
   void checkWebUi();
+  void environments.reconcile();
   const webUiTimer = setInterval(() => void checkWebUi(), WEB_UI_CHECK_MS);
   const pusher = setInterval(push, PUSH_EVERY_MS);
   const beat = setInterval(() => store.heartbeat(WEB_LOCK), HEARTBEAT_MS);
@@ -480,7 +500,7 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
     if (path === "/api/config") {
       await updater.describe().catch(() => {});
       const config = loadConfig();
-      return json({ webUiUrl: config.webUrl, kinds: AGENT_KINDS, local, instance, update: updater.status, pluginId: process.env.HERDR_PLUGIN_ID || "herdr-broadcast" });
+      return json({ webUiUrl: config.webUrl, kinds: DEFAULT_AGENT_KINDS, capabilities: AGENTS, local, instance, update: updater.status, pluginId: process.env.HERDR_PLUGIN_ID || "herdr-broadcast" });
     }
     if (path === "/api/web/restart") {
       if (request.method !== "POST") return fail(405, "method", "POST only");
@@ -505,7 +525,36 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
       if (!local) return fail(403, "local_only", "添加机器只能在这台电脑本机的浏览器里操作");
       return json(await webUiMachines(await machineList()));
     }
-    let match = /^\/api\/machines\/([^/]+)\/focus$/.exec(path);
+    let match = /^\/api\/machines\/([^/]+)\/(environment|prepare-agents|manual-binding)$/.exec(path);
+    if (match) {
+      const machine = engine.machine(decodeURIComponent(match[1]!));
+      if (!machine?.enabled) return fail(404, "machine_unavailable", "机器不存在或已停用");
+      if (match[2] === "environment") {
+        if (request.method !== "GET") return fail(405, "method", "GET only");
+        return json(await environments.check(machine.id));
+      }
+      if (request.method !== "POST") return fail(405, "method", "POST only");
+      if (match[2] === "prepare-agents") {
+        if (!local) return fail(403, "local_only", "准备集成只能从本机页面操作");
+        const body = await request.json() as { integrations?: unknown };
+        const operation = environments.start(machine.id, body.integrations, machine.target ?? LOCAL);
+        return json({ operationId: operation.id, operation }, 202);
+      }
+      const body = await request.json() as { pane?: unknown; terminal_id?: unknown };
+      await engine.refresh(machine.id);
+      const pane = engine.view(machine.id)?.panes.find(p => p.pane_id === body.pane && p.terminal_id === body.terminal_id);
+      if (!pane) throw new Error("所选终端已变化");
+      await confirmManual(store, machine.id, pane, manualBindingKey(machine.id, pane.terminal_id), "自定义 agent");
+      push(); return json({ ok: true, terminal_id: pane.terminal_id });
+    }
+    match = /^\/api\/environment-operations\/([^/]+)$/.exec(path);
+    if (match) {
+      if (!["GET", "DELETE"].includes(request.method)) return fail(405, "method", "GET or DELETE only");
+      if (request.method === "DELETE" && !local) return fail(403, "local_only", "取消准备只能从本机页面操作");
+      const operation = request.method === "DELETE" ? environments.cancel(match[1]!) : environments.get(match[1]!);
+      return operation ? json({ operation }) : fail(404, "not_found", "没有这个准备操作");
+    }
+    match = /^\/api\/machines\/([^/]+)\/focus$/.exec(path);
     if (match) {
       if (request.method !== "POST") return fail(405, "method", "POST only");
       // switches what this computer's Herdr shows: from its own browser only
@@ -659,7 +708,7 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
         const key = JSON.stringify([e.machine_id, e.terminal_id]);
         if (seen.has(key)) continue;
         seen.add(key);
-        executions.push({ ...e, target_kind: "existing" });
+        executions.push({ ...e, target_kind: "existing", continuation_source: continuationKey(original), parent_execution_id: original.id });
       }
       engine.assertAccepting();
       const round = store.createRound(parentId, prompt, executions);
@@ -674,6 +723,10 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
       // the chosen agents are checked against a fresh read of their machines
       const named = new Set((body.targets ?? []).map((t) => String(t.machine ?? "")));
       await Promise.all([...named].filter((id) => engine.machine(id)).map((id) => engine.refresh(id)));
+      for (const target of body.targets ?? []) if (target.manual === true) {
+        const binding = store.continuation(manualBindingKey(String(target.machine), String(target.terminal_id)));
+        if (!binding || !await refreshManual(String(target.machine), binding)) throw new Error("人工绑定失效，请重新确认终端");
+      }
       const executions = executionsFrom(body, engine);
       if (executions.length === 0) throw new Error("至少选择一个 agent，或添加一个新 agent");
       const firstLine = prompt.split("\n").find((l) => l.trim())!.trim();
@@ -830,6 +883,7 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
     server,
     engine,
     updater,
+    environments,
     resume() { accepting = true; engine.resume(); },
     async drain(timeoutMs = 120_000): Promise<boolean> {
       accepting = false; engine.pause();
@@ -841,6 +895,7 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
         await conversations.settle();
         await Promise.allSettled(terminalDrains);
         await addJobs.settle();
+        await environments.settle();
         await engine.settle();
         return true;
       })();
@@ -859,12 +914,14 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
       updater.stop();
       for (const stop of unwatch.values()) stop();
       addJobs.stopAll();
+      environments.stop();
       engine.stop();
       const closing = [...terminals];
       for (const terminal of closing) terminal.stop();
       server.stop(true);
       await conversations.settle();
       await addJobs.settle();
+      await environments.settle();
       await Promise.allSettled(closing.map((terminal) => terminal.done));
       await engine.settle();
     },

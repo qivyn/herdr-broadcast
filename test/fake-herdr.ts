@@ -23,6 +23,8 @@ interface Agent {
 }
 
 interface ServerState {
+  processes?: Record<string, { pid: number; name: string }[]>;
+  exitAfterPaste?: boolean;
   omitSessionReports?: boolean;
   next: number;
   workspaces: { workspace_id: string; label: string; active_tab_id: string }[];
@@ -42,6 +44,7 @@ interface ServerState {
   /** A session switch between agent.prompt refusal and raw-input fallback. */
   promptRefusalSession?: Agent["agent_session"];
   startDelayMs?: number;
+  startScreen?: string;
   /** agent kinds this machine has no program for: their start fails in the shell, as Herdr 0.9.5 shows it */
   missingKinds?: string[];
   /** what each pane shows, for pane read */
@@ -267,6 +270,7 @@ switch (command) {
   case "pane send-text": {
     const pane = server.panes.find((p) => p.pane_id === args[2]) ?? fail("pane_not_found");
     (server.typed ??= []).push({ pane_id: pane.pane_id, text: args[3]! });
+    if (server.exitAfterPaste) (server.processes ??= {})[pane.pane_id] = [];
     ok({ type: "ok" });
   }
   case "pane send-keys": {
@@ -300,17 +304,23 @@ switch (command) {
     }
     const n = server.next++;
     const agent: Agent = { pane_id: pane.pane_id, tab_id: pane.tab_id, workspace_id: pane.workspace_id, terminal_id: pane.terminal_id, agent: kind, name, agent_status: process.env.FAKE_START_BLOCKED ? "blocked" : "idle", state_change_seq: n, completion_seq: null, cwd: pane.cwd };
-    const agentArgs = args.slice(args.indexOf("--") + 1);
-    if (!server.omitSessionReports && args.includes("--") && ["--resume", "resume", "--session"].includes(agentArgs[0]!) && agentArgs[1]) {
-      agent.agent_session = { agent: agent.agent, kind: agentArgs[1].startsWith("/") ? "path" : "id", source: "integration", value: agentArgs[1] };
+    const agentArgs = args.slice(args.indexOf("--") + 1).filter(arg => arg !== "--no-daemon");
+    const restoredValue = agentArgs[0]?.startsWith("--resume=") ? agentArgs[0].slice(9) : ["--resume", "resume", "--session", "--conversation"].includes(agentArgs[0]!) ? agentArgs[1] : null;
+    if (!server.omitSessionReports && args.includes("--") && restoredValue) {
+      agent.agent_session = { agent: agent.agent, kind: restoredValue.startsWith("/") ? "path" : "id", source: "integration", value: restoredValue };
     }
     server.agents.push(agent);
+    if (server.startScreen) (server.screens ??= {})[pane.pane_id] = server.startScreen;
     if (process.env.FAKE_START_BLOCKED) fail("agent_not_ready");
     if (server.startDelayMs) await Bun.sleep(server.startDelayMs);
     ok({ type: "agent_started", agent: { ...agent, focused: false } });
   }
   case "pane list":
     ok({ panes: server.panes.map((p) => ({ ...p, agent_status: server.agents.find((a) => a.pane_id === p.pane_id)?.agent_status ?? "unknown" })) });
+  case "pane process-info": {
+    const pane = server.panes.find(p => p.pane_id === flag("--pane")) ?? fail("pane_not_found");
+    ok({ process_info: { pane_id: pane.pane_id, shell_pid: 1, foreground_processes: server.processes?.[pane.pane_id] ?? [] } });
+  }
   case "pane read": {
     const pane = server.panes.find((p) => p.pane_id === args[2]) ?? fail("pane_not_found");
     unlock();

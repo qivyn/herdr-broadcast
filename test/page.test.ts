@@ -255,7 +255,7 @@ for (const session of [
     const data = { agents: [{ machine: { id: "local", label: "Local" }, loading: false, agents: [a] }] };
     const host = { replaceChildren() { elements.length = 0; }, append() {} };
     const ui = runInNewContext(`(function(){let targetsShape='';let filterRows=[];${setup}\n${render}\nreturn {renderTargets,identities:targetIdentities};})()`, {
-      compose, data, loaded: true, targets: host, filter: { value: "" }, statusOf: () => ["ok", "idle"],
+      compose, data, loaded: true, targets: host, customSelect: { dataset: {}, value: "", replaceChildren() {} }, filter: { value: "" }, statusOf: () => ["ok", "idle"],
       key: (m: string, p: string) => `${m}\0${p}`, statusCells: new Map(), byWorkspace: (agents: any[]) => [["Project", agents]],
       applyFilter() {}, syncChecks() {}, updateComposer() {}, rowText: () => "", baseName: (s: string) => s, toast() {},
       h: (tag: string, attrs: any, ...children: any[]) => {
@@ -783,7 +783,8 @@ test("a takeover preserves the visible screen with a paused status until the ter
 test("each human-action case has exactly one concise status and one button", () => {
   for (const [patch, text, button] of [
     [{ terminal_state: "unreachable", requires_action: true }, "设备连接需要设置", "打开连接设置"],
-    [{ terminal_state: "restoring", restore_kind: "confirm" }, "需要你完成确认", "查看并确认"],
+    [{ terminal_state: "restoring", restore_kind: "confirm" }, "请在终端完成启动确认", "查看并确认"],
+    [{ terminal_state: "restoring", restore_kind: "manual" }, "请手动打开 agent 并选择原历史", "已恢复此会话"],
     [{ terminal_state: "restoring", restore_kind: "identity" }, "会话身份尚未核实", "核对会话"],
     [{ terminal_state: "restoring", restore_kind: "choose" }, "请选择要继续的对话", "选择对话"],
     [{ terminal_state: "conflict" }, "请选择要继续的对话", "选择对话"],
@@ -1348,4 +1349,22 @@ describe("new version notice", () => {
       button(blocked, "暂时忽略").events.click!(); expect(blocked.requests).toEqual([]);
     }
   });
+});
+
+for (const [state, value, expected] of [["native", "native-original", "已绑定原生会话"], ["pending", null, "正在核验原生会话"], ["manual", null, "人工确认的终端"], ["unknown", null, "尚未绑定原生会话"]]) test(`agent cards expose ${state} binding independently of sent status`, () => {
+  const h = detailHarness({ setup: b => Object.assign(b.executions[1], { state: "sent", identity_state: state, session_value: value }) });
+  const info = h.one("identity-info");
+  expect(info.textContent).toContain(expected!);
+  expect(info.textContent).toContain("关闭浏览器标签不会停止 agent");
+  if (value) expect(info.textContent).toContain(value);
+  if (state === "unknown") expect(info.textContent).toContain("安装成功并不表示此会话已绑定");
+  h.view.dispose();
+});
+
+for (const [state, expected] of [["report_timeout", "期间未收到"], ["proof_timeout", "未能核实本轮输入"], ["unavailable", "超过读取限制"], ["unsupported", "尚不支持"], ["verifying", "上次身份核验未完成"]]) test(`binding explanation displays ${state} without sending input`, () => {
+  const h = detailHarness({ setup: b => Object.assign(b.executions[1], { state: "sent", session_value: null, identity_state: "unknown",
+    identity_check: { state, reason: "read_limit", reported_at: state === "report_timeout" ? undefined : 123 } }) });
+  expect(h.one("identity-info").textContent).toContain(expected!);
+  expect(h.requests).toHaveLength(0);
+  h.view.dispose();
 });

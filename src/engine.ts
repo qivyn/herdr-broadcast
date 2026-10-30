@@ -11,6 +11,11 @@ import {
   workspaceCreate, workspaceFocus, workspaceList, paneList, type Created, type MachineProfile,
 } from "./herdr.ts";
 import type { AgentInfo, PaneInfo, WorkspaceInfo } from "./herdr-types.ts";
+import { refreshManual } from "./manual-session.ts";
+import { continuationKey } from "./conversation-target.ts";
+import { agentLaunchArgs, codexInputBlock } from "./agent-launch.ts";
+import { acquireIdentity } from "./identity-acquisition.ts";
+import { verifyReportedSession } from "./session-discovery.ts";
 
 export interface Machine {
   /** LOCAL or a saved profile id */
@@ -121,12 +126,22 @@ export function shapePrompt(text: string): string {
  */
 // Serialize only the terminal write (paste + Enter), never the agent's AI work.
 const promptWrites = new Map<string, Promise<AgentInfo | null>>();
-export async function submitPrompt(machine: string, pane: string, text: string, beforeWrite?: () => Promise<void>): Promise<AgentInfo | null> {
+export async function submitPrompt(machine: string, pane: string, text: string, beforeWrite?: () => Promise<void>, manual = false): Promise<AgentInfo | null> {
   const key = JSON.stringify([machine, pane]);
   const previous = promptWrites.get(key) ?? Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     await beforeWrite?.();
     const shaped = shapePrompt(text);
+    if (manual) {
+      if (!beforeWrite) throw new Error("人工终端需要验证进程身份");
+      try {
+        await paneSendText(machine, pane, shaped.includes("\n") ? `\x1b[200~${shaped}\x1b[201~` : shaped);
+        await sleep(SUBMIT_DELAY_MS);
+        await beforeWrite();
+        await paneSendKeys(machine, pane, ["enter"]);
+      } catch (error) { throw new Error(message(error)); }
+      return null;
+    }
     try {
       return await agentPrompt(machine, pane, shaped);
     } catch (error) {
@@ -138,6 +153,7 @@ export async function submitPrompt(machine: string, pane: string, text: string, 
       try {
         await paneSendText(machine, pane, shaped.includes("\n") ? `\x1b[200~${shaped}\x1b[201~` : shaped);
         await sleep(SUBMIT_DELAY_MS);
+        await beforeWrite?.();
         await paneSendKeys(machine, pane, ["enter"]);
         return null; // Raw input has no session-bearing delivery response.
       } catch (failure) {
@@ -164,7 +180,9 @@ export class Engine {
   /** serializes workspace creation per broadcast + machine */
   private groupLocks = new Map<string, Promise<unknown>>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  private readonly timing: { tickMs: number; localPollMs: number; remotePollMs: number; launchPollMs: number; startupConfirmMs: number };
+  private readonly timing: { tickMs: number; localPollMs: number; remotePollMs: number; launchPollMs: number; startupConfirmMs: number; identityWaitMs: number };
+  private identityWaits = new Map<number, AbortController>();
+  identityPending(id: number): boolean { return this.identityWaits.has(id); }
   private startupWaits = new Map<number, AbortController>();
   /** reads, sends and starts in flight, so a process can wait for them before it lets go of its database */
   private pending = new Set<Promise<unknown>>();
@@ -172,8 +190,9 @@ export class Engine {
   private stopped = false;
   private paused = false;
 
-  constructor(readonly store: Store, private readonly changed: () => void, timing: Partial<Engine["timing"]> = {}) {
-    this.timing = { tickMs: 500, localPollMs: LOCAL_POLL_MS, remotePollMs: REMOTE_POLL_MS, launchPollMs: 1_000, startupConfirmMs: 300_000, ...timing };
+  constructor(readonly store: Store, private readonly changed: () => void, timing: Partial<Engine["timing"]> = {},
+    readonly launchArgs = agentLaunchArgs, private readonly verifyIdentity = verifyReportedSession) {
+    this.timing = { tickMs: 500, localPollMs: LOCAL_POLL_MS, remotePollMs: REMOTE_POLL_MS, launchPollMs: 1_000, startupConfirmMs: 300_000, identityWaitMs: 15_000, ...timing };
   }
 
   private track(work: Promise<unknown>): void {
@@ -204,13 +223,14 @@ export class Engine {
   /** Stops polling and startup-confirmation waits. Other in-flight work finishes; await settle() before closing the store. */
   stop(): void {
     this.stopped = true;
+    for (const wait of this.identityWaits.values()) wait.abort();
     this.abortStartupWaits();
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
   }
 
   /** Refuse new submissions and end startup-confirmation waits; other accepted operations finish normally. */
-  pause(): void { this.paused = true; this.abortStartupWaits(); }
+  pause(): void { this.paused = true; this.abortStartupWaits(); for (const wait of this.identityWaits.values()) wait.abort(); }
   resume(): void { this.paused = false; }
   get dispatching(): boolean { return !this.stopped && !this.paused; }
   assertAccepting(): void {
@@ -301,6 +321,9 @@ export class Engine {
     if (!previous) this.views.set(machineId, { agents: [], panes: [], workspaces: [], at: 0, error: null, loading: true });
     try {
       const [agents, workspaces, panes] = await Promise.all([agentList(machineId), workspaceList(machineId), paneList(machineId)]);
+      const manual = this.store.db.query<{ id: number }, [string]>("SELECT e.id FROM executions e JOIN continuations c ON c.key = 'execution:' || e.id WHERE e.machine_id = ? AND json_extract(c.data, '$.manual_required') = 1").all(machineId);
+      const bindings = new Map(manual.flatMap(({ id }) => { const b = this.store.continuation(`execution:${id}`); return b ? [[b.terminal_id, b] as const] : []; }));
+      await Promise.all([...bindings.values()].map(b => refreshManual(machineId, b)));
       // stopped while herdr answered: the store may be on its way out
       if (this.stopped) return;
       this.views.set(machineId, { agents, panes, workspaces, at: Date.now(), error: null, loading: false });
@@ -325,7 +348,23 @@ export class Engine {
       const e = this.store.execution(original.id)!;
       const round = this.store.getRound(e.round_id);
       if (!e.pane_id || !round) throw new Error("广播目标或轮次不存在");
+      const manualBinding = this.store.continuation(continuationKey(e));
+      const manual = e.agent_kind === "custom" || manualBinding?.manual_required === true;
       const response = await submitPrompt(e.machine_id, e.pane_id, round.prompt, async () => {
+        if (e.agent_kind === "codex") {
+          const blocked = codexInputBlock(await paneRead(e.machine_id, e.pane_id!, 40, "visible"));
+          if (blocked) {
+            if (create && !attempted) await this.waitForStartupConfirmation(e.id, e.agent_name!);
+            else throw new HerdrError("agent_blocked", blocked + "；未发送消息，请处理后手动重试");
+          }
+        }
+        if (manual) {
+          const binding = manualBinding;
+          if (!binding || this.store.continuation(continuationKey(e))?.manual_process?.token !== binding.manual_process?.token
+            || !await refreshManual(e.machine_id, binding) || binding.pane_id !== e.pane_id || binding.terminal_id !== e.terminal_id) throw new Error("人工绑定的进程已退出、替换或无法核实，请重新确认后发送");
+          this.store.update(e.id, { state: "sending", input_attempted: 1, sent_at: this.store.execution(e.id)!.sent_at ?? Date.now() });
+          attempted = true; return;
+        }
         // Do this inside the terminal write lock, so identity cannot go stale while another paste ends.
         const agent = await agentGet(e.machine_id, e.pane_id!);
         // A second check before raw fallback must retain identity learned by the first check.
@@ -344,8 +383,9 @@ export class Engine {
           cwd: agent.foreground_cwd ?? agent.cwd ?? current.cwd, agent_kind: kind,
           session_kind: session?.value ? session.kind : current.session_kind, session_value: session?.value || current.session_value,
         });
+        if (session?.value && !this.store.continuation(`identity:${e.id}`)) this.store.rememberIdentitySource(this.store.execution(e.id)!, "query");
         attempted = true;
-      });
+      }, manual);
       if (response) {
         const sent = this.store.execution(e.id)!;
         const session = response.agent_session;
@@ -355,10 +395,21 @@ export class Engine {
             || (sent.session_value && (session.value !== sent.session_value || session.kind !== sent.session_kind))))) {
           throw new Error("发送返回的会话身份与目标不一致，无法确认投递到原会话；请检查终端，不会自动重发");
         }
-        // Only this submission's response can fill its missing identity, never a later poll.
-        if (!sent.session_value && session?.value) this.store.update(e.id, { session_kind: session.kind, session_value: session.value });
+        // This submission's receipt is evidence; an unrelated later poll is not.
+        if (!sent.session_value && session?.value) {
+          this.store.update(e.id, { session_kind: session.kind, session_value: session.value });
+          this.store.rememberIdentitySource(this.store.execution(e.id)!, "prompt");
+        }
       }
       this.store.update(e.id, { state: "sent", note: null, error: null, owner_pid: null });
+      const sent = this.store.execution(e.id)!;
+      if (this.dispatching && sent.agent_kind !== "custom" && (!sent.session_value || manualBinding?.native_pending)) {
+        const wait = new AbortController();
+        this.identityWaits.set(e.id, wait);
+        this.track(acquireIdentity(this.store, sent, wait.signal, this.timing.identityWaitMs, this.verifyIdentity)
+          .catch(() => { /* An unavailable identity never rewrites a successful submission. */ })
+          .finally(() => { this.identityWaits.delete(e.id); if (!this.stopped) { this.track(this.refresh(e.machine_id)); this.changed(); } }));
+      }
     } catch (error) {
       const refused = error instanceof HerdrError && ["agent_blocked", "agent_not_ready", "agent_not_found", "pane_not_found"].includes(error.code);
       const uncertain = attempted && !refused;
@@ -381,6 +432,7 @@ export class Engine {
     if (!broadcast) return;
     const kind = e.agent_kind ?? "claude";
     const cwd = resolveCwd(e.machine_id, e.cwd ?? "~");
+    const args = await this.launchArgs(e.machine_id, kind);
     this.store.update(e.id, { note: "正在创建工作区…" });
     const created = await this.placeFor(e, broadcast.title, cwd);
     const pane = created.root_pane?.pane_id;
@@ -394,9 +446,10 @@ export class Engine {
       note: `正在启动 ${kind}…`,
     });
     const name = e.agent_name ?? agentNameFor(e.broadcast_id, kind, e.slot);
+    let startResponse: AgentInfo | null = null;
     for (let attempt = 1; ; attempt += 1) {
       try {
-        await this.startWatched(e.machine_id, { name, kind, pane, timeoutMs: 90_000 });
+        startResponse = await this.startWatched(e.machine_id, { name, kind, pane, timeoutMs: 90_000, args });
         break;
       } catch (error) {
         if (error instanceof HerdrError && error.code === "agent_not_ready") {
@@ -420,6 +473,14 @@ export class Engine {
     const agent = await agentGet(e.machine_id, pane);
     if (agent.pane_id !== pane || !created.root_pane?.terminal_id || agent.terminal_id !== created.root_pane.terminal_id
       || (agent.agent ?? agent.display_agent) !== kind || agent.name !== name) throw new Error("启动的 agent 或终端已变化，消息未发送；请检查后手动重试");
+    const session = startResponse?.agent_session;
+    if (session?.value) {
+      if (startResponse!.pane_id !== pane || startResponse!.terminal_id !== agent.terminal_id || (startResponse!.agent ?? startResponse!.display_agent) !== kind
+        || session.agent !== kind || !["id", "path"].includes(session.kind)
+        || (agent.agent_session?.value && (session.value !== agent.agent_session.value || session.kind !== agent.agent_session.kind || agent.agent_session.agent !== kind))) throw new Error("启动返回的会话身份与目标不一致，消息未发送");
+      this.store.update(e.id, { session_kind: session.kind, session_value: session.value });
+      this.store.rememberIdentitySource(this.store.execution(e.id)!, "start");
+    }
     this.store.update(e.id, {
       agent_name: name,
       note: null,
@@ -457,9 +518,20 @@ export class Engine {
       };
       check(before);
       wait.signal.throwIfAborted();
-      const ready = await agentWaitReady(e.machine_id, e.pane_id!, this.timing.startupConfirmMs, wait.signal);
-      wait.signal.throwIfAborted();
-      check(ready);
+      const deadline = Date.now() + this.timing.startupConfirmMs;
+      let ready: AgentInfo;
+      while (true) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new HerdrError("timeout", "startup confirmation timed out");
+        ready = await agentWaitReady(e.machine_id, e.pane_id!, remaining, wait.signal);
+        wait.signal.throwIfAborted();
+        check(ready);
+        if (e.agent_kind !== "codex" || !codexInputBlock(await paneRead(e.machine_id, e.pane_id!, 40, "visible"))) break;
+        await sleepUnless(Math.min(500, remaining), wait.signal);
+        wait.signal.throwIfAborted();
+      }
+      // Check again after reading the screen; never accept a replacement occupant.
+      check(await agentGet(e.machine_id, e.pane_id!));
       if (!READY.includes(ready.agent_status)) throw new Error("Agent 尚未就绪，消息未发送；请检查后手动重试");
       if (before.agent_session?.value && (ready.agent_session?.value !== before.agent_session.value
         || ready.agent_session?.kind !== before.agent_session.kind || ready.agent_session?.agent !== before.agent_session.agent)) {
@@ -479,7 +551,7 @@ export class Engine {
    * `agent start`, watching the pane meanwhile: when the shell says the command could not run,
    * Herdr would still wait out its whole timeout. The start is stopped then, with the shell's words.
    */
-  private async startWatched(machine: string, opts: { name: string; kind: string; pane: string; timeoutMs: number }): Promise<void> {
+  private async startWatched(machine: string, opts: { name: string; kind: string; pane: string; timeoutMs: number; args?: string[] }): Promise<AgentInfo | null> {
     const stop = new AbortController();
     // what the pane shows before anything is typed, so an old line is not taken for this launch's
     const before = await paneRead(machine, opts.pane).catch(() => "");
@@ -501,7 +573,7 @@ export class Engine {
       }
     })();
     try {
-      await start;
+      return await start;
     } catch (error) {
       if (failed !== null) throw new LaunchFailedError(`${opts.kind} 无法在这台机器上启动：\n${failed}`, failed);
       throw error;
@@ -566,7 +638,7 @@ export class Engine {
     // A concurrent refresh may have changed the record while the machine answered.
     if (this.store.execution(e.id)?.state !== e.state) throw new Error("任务状态已变化，请重新检查后再发送");
     this.assertAccepting();
-    const round = this.store.createRetryRound(e, target);
+    const round = this.store.createRetryRound(e, { ...target, continuation_source: continuationKey(e), parent_execution_id: e.id });
     this.submit(round.id);
     this.changed();
     return round;

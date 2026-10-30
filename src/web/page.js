@@ -564,7 +564,7 @@ function newView(main) {
     const k = `${machine}\0${agent.pane_id}`;
     compose.picked.add(k);
     targetIdentities.set(k, { machine, pane: agent.pane_id, terminal_id: agent.terminal_id, agent_kind: agent.kind,
-      session_kind: agent.session_kind, session_value: agent.session_value });
+      session_kind: agent.session_kind, session_value: agent.session_value, ...(agent.manual ? { manual: true } : {}) });
   };
   compose.picked.clear();
   compose.newPicks.clear();
@@ -590,7 +590,7 @@ function newView(main) {
   // Keep the full agent catalog in one compact, keyboard-accessible control.
   const kindPills = h("select", { class: "kind-select", "aria-label": "新 agent 的类型", onchange: () => { compose.kind = kindPills.value; renderFolders(); } });
   const renderKinds = () => {
-    kindPills.replaceChildren(...config.kinds.map(k => h("option", { value: k }, k)));
+    kindPills.replaceChildren(...config.kinds.map(k => h("option", { value: k }, (config.capabilities || []).find(a => a.kind === k)?.name || k)));
     kindPills.value = currentKind();
   };
   renderKinds();
@@ -630,6 +630,17 @@ function newView(main) {
     h("p", { class: "sub" }, "立即发送到它们当前的对话，忙碌时由 agent 自己处理消息。输入框里没发出去的草稿会和 prompt 一起发出，先确认是空的。"),
     filter,
     targets);
+  const customSelect = h("select", { "aria-label": "自定义 agent 所在终端" });
+  existingPanel.append(h("details", { class: "panel" }, h("summary", null, "添加自定义 agent"),
+    h("p", { class: "sub" }, "先在 Herdr 终端启动 agent 并选择会话，再选择该终端。人工确认仅在当前进程期间有效；在进程内切换会话后，请重新绑定。"), customSelect,
+    h("button", { class: "btn", type: "button", onclick: async () => {
+      try {
+        const selected = JSON.parse(customSelect.value);
+        await post(`/api/machines/${encodeURIComponent(selected.machine)}/manual-binding`, selected);
+        pickTarget(selected.machine, { pane_id: selected.pane, terminal_id: selected.terminal_id, kind: "custom", manual: true });
+        updateComposer(); toast("已添加人工确认的终端");
+      } catch (error) { toast(error.message, true); }
+    } }, "确认此终端并加入广播")));
   const tabButton = (name, text) => h("button", { class: "tab", type: "button", role: "tab", id: `tabbtn-${name}`, "aria-controls": `tab-${name}`, onclick: () => showTab(name),
     // ← → between the two, as a tab list does
     onkeydown: (event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); showTab(name === "new" ? "existing" : "new"); $(`tabbtn-${name === "new" ? "existing" : "new"}`).focus(); } } },
@@ -702,6 +713,14 @@ function newView(main) {
   }
 
   function renderTargets() {
+    const customOptions = (data.agents || []).flatMap(g => (g.terminals || []).map(p => ({ value: JSON.stringify({ machine: g.machine.id, pane: p.pane_id, terminal_id: p.terminal_id }), label: `${g.machine.label} · ${p.pane_id} · ${p.cwd || ""}` })));
+    const customShape = JSON.stringify(customOptions);
+    if (customSelect.dataset.shape !== customShape) {
+      const previous = customSelect.value;
+      customSelect.replaceChildren(...customOptions.map(p => h("option", { value: p.value }, p.label)));
+      if (customOptions.some(p => p.value === previous)) customSelect.value = previous;
+      customSelect.dataset.shape = customShape;
+    }
     const shape = JSON.stringify(data.agents.map((g) => [g.machine.id, g.loading, !!g.error, g.agents.map((a) => [a.pane_id, a.terminal_id, a.session_kind, a.session_value, a.workspace, a.name, a.kind, a.cwd, a.title])]));
     if (shape === targetsShape) {
       // same agents as before: only their states move
@@ -726,7 +745,7 @@ function newView(main) {
         h("span", null, id === "local" ? group.machine.label : `${group.machine.label}（SSH）`),
         down ? h("span", { class: "down-tag" }, "连不上") : h("span", { class: "meta" }, group.loading ? "读取中…" : `${group.agents.length} 个 agent`),
         h("span", { class: "spacer" }),
-        h("button", { class: "btn quiet", type: "button", onclick: () => { for (const a of group.agents) compose.picked.delete(key(id, a.pane_id)); syncChecks(); } }, "清空")));
+        h("button", { class: "btn quiet", type: "button", onclick: () => { for (const picked of compose.picked) if (picked.startsWith(`${id}\0`)) compose.picked.delete(picked); syncChecks(); } }, "清空")));
       // a machine that does not answer lists nothing: what it had last may be gone
       if (down) {
         panel.append(downNote(id, group.error));
@@ -782,6 +801,13 @@ function newView(main) {
    * checked first: it must be there. `known`: a folder listed, or one already checked.
    */
   async function addNew(machine, cwd, known = false) {
+    try {
+      const environment = await api(`/api/machines/${encodeURIComponent(machine)}/environment`);
+      if (!environment.agents.find(a => a.kind === currentKind())?.ready) {
+        showAgentPreparation({ id: machine, label: data.state.machines.find(m => m.id === machine)?.label || machine }, environment);
+        return;
+      }
+    } catch (error) { return toast(error.message, true); }
     let path = (cwd || "").trim();
     if (path.length > 1) path = path.replace(/\/+$/, "");
     if (!path) return toast("先填写目录", true);
@@ -907,6 +933,7 @@ function newView(main) {
       const known = new Set(group.folders.map((f) => f.path));
       const picked = (path) => [...compose.newPicks.values()].some((p) => p.machine === id && p.cwd === path);
       const panel = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("span", null, id === "local" ? group.machine.label : `${group.machine.label}（SSH）`)));
+      panel.firstChild.append(h("span", { class: "spacer" }), h("button", { class: "btn quiet", type: "button", onclick: () => showAgentPreparation(group.machine) }, "准备 Agent"));
       // nothing new starts on a machine that does not answer: no folders to offer until it does
       if (group.error) {
         panel.classList.add("down");
@@ -945,7 +972,7 @@ function newView(main) {
       const agent = group && group.agents.find((a) => a.pane_id === pane);
       const where = machine === "local" ? "" : ` · ${group ? group.machine.label : machine}`;
       const down = machineDown(machine);
-      chips.push(h("span", { class: `tchip${down ? " bad" : ""}`, title: down ? downReason(machine) : agent && agent.cwd ? agent.cwd : null }, `${agent ? agent.kind : "agent"} ${agent ? agent.name || pane : pane}${where}`,
+      chips.push(h("span", { class: `tchip${down ? " bad" : ""}`, title: down ? downReason(machine) : agent && agent.cwd ? agent.cwd : null }, `${targetIdentities.get(k)?.manual ? "人工终端" : agent ? agent.kind : "agent"} ${agent ? agent.name || pane : pane}${where}`,
         h("button", { type: "button", "aria-label": "不发给它", onclick: () => { compose.picked.delete(k); syncChecks(); } }, "×")));
     }
     for (const [k, p] of compose.newPicks) {
@@ -1092,6 +1119,67 @@ function settingsView(main) {
 }
 
 // ---- machines: Herdr's saved SSH machines, and adding one ---------------------------------
+
+function showAgentPreparation(machine, initial = null) {
+  const dialog = h("dialog", { class: "agent-preparation", "aria-label": `准备 Agent · ${machine.label}` });
+  const content = h("div");
+  let snapshot = initial, operation = (data.environmentOperations || []).filter(o => o.machine === machine.id).at(-1), busy = false, closed = false, timer;
+  const selected = new Set();
+  const close = () => dialog.close();
+  const check = async () => {
+    busy = true; render();
+    try { snapshot = await api(`/api/machines/${encodeURIComponent(machine.id)}/environment`); }
+    catch (error) { snapshot = { agents: [], error: error.message }; }
+    finally { busy = false; if (!closed) render(); }
+  };
+  const poll = async () => {
+    if (closed || !operation || operation.state !== "running") return;
+    try { operation = (await api(`/api/environment-operations/${operation.id}`)).operation; }
+    catch (error) { if (!closed) content.append(h("p", { class: "wnote bad" }, error.message)); return; }
+    if (closed) return;
+    render();
+    if (operation.state === "running") timer = setTimeout(poll, 1000);
+    else await check();
+  };
+  const prepare = async () => {
+    busy = true; render();
+    try { operation = (await post(`/api/machines/${encodeURIComponent(machine.id)}/prepare-agents`, { integrations: [...selected] })).operation; }
+    catch (error) { toast(error.message, true); }
+    finally { busy = false; if (!closed) { render(); poll(); } }
+  };
+  function render() {
+    const running = operation?.state === "running";
+    for (const a of snapshot?.agents || []) if (a.ready) selected.delete(a.integration);
+    content.replaceChildren(
+      h("h2", null, `准备 Agent · ${machine.label}`),
+      h("p", { class: "sub" }, "检测 CLI 和会话集成。所选操作只安装或更新 Herdr 集成；CLI、运行依赖和模型凭据请按官方指引准备。集成就绪后，需要 agent 启动并上报原生会话标识。"),
+      h("button", { class: "btn", type: "button", disabled: busy || running, onclick: check }, busy ? "检查中…" : "重新检查"));
+    if (snapshot?.error) content.append(h("p", { class: "wnote bad" }, snapshot.error));
+    for (const a of snapshot?.agents || []) {
+      const checkbox = h("input", { type: "checkbox", checked: selected.has(a.integration), disabled: busy || running || !a.cliReady || !a.configReady || a.ready,
+        onchange: event => { if (event.target.checked) selected.add(a.integration); else selected.delete(a.integration); render(); } });
+      content.append(h("section", { class: "environment-agent" }, h("label", null, checkbox, h("strong", null, a.name)),
+        h("span", { class: "sub" }, `${a.cliReady ? "CLI 可用" : a.cli ? "CLI 需要处理" : "CLI 缺失"} · ${a.ready ? "会话集成已准备" : a.reason || "需要检查"}`),
+        a.configDir ? h("code", null, a.configDir) : null,
+        a.version ? h("small", null, a.version) : null,
+        h("a", { href: a.guide, target: "_blank", rel: "noopener noreferrer" }, "官方安装指引 ↗")));
+    }
+    if (operation) {
+      const labels = { pending: "等待", checking: "检查中", installing: "安装中", ready: "已准备", failed: "失败", cancelled: "已取消" };
+      content.append(h("div", { class: "environment-progress", role: "status" }, operation.items.map(i => h("p", null, `${i.integration}：${labels[i.state]}${i.reason ? ` · ${i.reason}` : ""}`))));
+      if (running) content.append(h("button", { class: "btn", type: "button", disabled: !config.local, onclick: async () => {
+        try { await api(`/api/environment-operations/${operation.id}`, { method: "DELETE" }); }
+        catch (error) { toast(error.message, true); }
+      } }, "取消准备"));
+    }
+    content.append(h("div", { class: "wrow" },
+      h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, "准备所选集成"),
+      h("button", { class: "btn", type: "button", onclick: close }, running ? "关闭（后台继续）" : "完成 / 跳过")));
+  }
+  dialog.append(content); document.body.append(dialog);
+  dialog.addEventListener("close", () => { closed = true; clearTimeout(timer); dialog.remove(); });
+  render(); dialog.showModal(); if (!initial) check(); if (operation?.state === "running") poll();
+}
 
 /** Two Herdr versions alike (`herdr 0.9.5`): what `herdr machine add` asks of a server. */
 function sameHerdr(remote, local) {
@@ -1287,6 +1375,7 @@ function machinesView(main) {
         ? `这台机器上还有 ${active} 个进行中的广播：删除后它们连不上这台机器，会停在原地。远程的 agent 本身照常运行`
         : "只让本机忘记这个连接，远程的会话和 agent 照常运行" }),
     ];
+    actions.unshift(h("button", { class: "btn quiet", type: "button", disabled: !m.enabled, onclick: () => showAgentPreparation(m) }, "准备 Agent"));
     return h("div", { class: `mrow${!m.enabled ? " off" : ""}` },
       h("span", { class: `dot ${t}` }),
       h("div", { class: "mmain" }, name,
@@ -1732,6 +1821,10 @@ function machinesView(main) {
       const fresh = () => { Object.assign(w, { target: "", label: "", keyPath: "", session: null, from: null }); reset(); renderImports(); };
       out.push(h("div", { class: "wdone" }, h("p", null, `已添加 ${w.label || w.target}，它现在在下面的列表和 Herdr 的侧边栏里。`),
         h("div", { class: "wrow" },
+          h("button", { class: "btn", type: "button", onclick: () => {
+            const machine = data.state.machines.find(m => m.target === w.target || m.target === w.target.replace(/^ssh:\/\//, ""));
+            if (machine) showAgentPreparation(machine); else toast("机器列表正在更新，请从下方机器的「准备 Agent」入口继续");
+          } }, "准备 Agent（可跳过）"),
           h("button", { class: "btn primary", type: "button", onclick: () => { fresh(); renderWizard(); showAdd(false); } }, "完成"),
           h("button", { class: "btn", type: "button", onclick: () => { fresh(); renderWizard(); } }, "再添加一台"))));
     }
@@ -1781,7 +1874,8 @@ function connectionPresentation(e, ready, recovery = null, handedOff = false) {
     ready: { kind: "ready", text: "", action: null, button: "" },
     connecting: { kind: "connecting", text: "正在连接…", action: null, button: "" },
     handedOff: { kind: "handedOff", text: "画面已暂停，点击终端可接管", action: null, button: "" },
-    confirm: { kind: "confirm", text: "需要你完成确认", action: "confirm", button: "查看并确认" },
+    confirm: { kind: "confirm", text: "请在终端完成启动确认", action: "confirm", button: "查看并确认" },
+    manual: { kind: "manual", text: "请手动打开 agent 并选择原历史", action: "identity", button: "已恢复此会话" },
     identity: { kind: "identity", text: "会话身份尚未核实", action: "identity", button: "核对会话" },
     identityPending: { kind: "identityPending", text: "尚未获取会话标识", action: null, button: "" },
     startConfirm: { kind: "confirm", text: "等待启动确认，完成后自动发送", action: "confirm", button: "查看并确认" },
@@ -1799,7 +1893,7 @@ function connectionPresentation(e, ready, recovery = null, handedOff = false) {
   if (e.needs_start_confirmation) return e.state === "starting" ? states.startConfirm : states.confirm;
   if (e.terminal_state === "identity_pending") return states.identityPending;
   if (e.terminal_state === "restoring") return e.restore_pending ? states.connecting
-    : states[e.restore_kind === "choose" ? "choose" : e.restore_kind === "identity" ? "identity" : "confirm"];
+    : states[e.restore_kind === "manual" ? "manual" : e.restore_kind === "choose" ? "choose" : e.restore_kind === "identity" ? "identity" : "confirm"];
   if (e.terminal_state === "closed") {
     if (!e.can_resume) return states.unavailable;
     return states.closed;
@@ -2056,6 +2150,10 @@ function broadcastView(main, id, focusExec) {
     }, h("div", { class: "rename-row" }, nameInput, saveName, cancelName),
       h("span", { class: "rename-hint" }, "修改真实 agent 名称，与 herdr-web-ui 同步。小写字母开头，最多 32 个字符。"), nameError);
     const state = h("span", { class: "state" });
+    const identityLabel = h("summary");
+    const identityHelp = h("p");
+    const identityId = h("code");
+    const identityInfo = h("details", { class: "identity-info" }, identityLabel, identityHelp, identityId);
     const machineName = h("span", { class: "machine-name" });
     const machineBadge = h("span", { class: "machine-badge" },
       h("span", { class: "machine-icon", "aria-hidden": "true", html: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="8.5" rx="1.5"/><path d="M8 11v2.5M5 13.5h6"/></svg>' }), machineName);
@@ -2072,12 +2170,12 @@ function broadcastView(main, id, focusExec) {
     const grow = h("button", { class: "icon-btn", type: "button", "aria-pressed": "false", title: "放大（Esc 恢复）", "aria-label": "放大", html: GROW_ICON, onclick: () => toggleBig(panel) });
     // a double click on the head, not the screen: there it selects a word to copy
     const head = h("div", { class: "screen-head", ondblclick: (event) => { if (!event.target.closest("button, details")) toggleBig(panel); } },
-      who, h("span", { class: "screen-status" }, dot, state, grow), where, opensBox);
+      who, h("span", { class: "screen-status" }, dot, state, grow), where, opensBox, identityInfo);
     const pick = h("input", { type: "checkbox", class: "pick", title: "选择这个 agent，在页面上方继续广播", "aria-label": "选择此 agent 继续广播",
       onchange: () => { if (pick.checked) picked.add(panel.current.id); else picked.delete(panel.current.id); syncPicked(); } });
     head.prepend(h("label", { class: "pick-box", title: "选择这个 agent，在页面上方继续广播" }, pick));
     const typing = h("div", { class: "typing" }, "⌨ 正在输入到这个 agent");
-    const panel = { el, dot, who, whoName, whoKind, renameButton, current: e, state, connection, connectionAction, connectionBar,
+    const panel = { el, dot, who, whoName, whoKind, renameButton, current: e, state, identityLabel, identityHelp, identityId, connection, connectionAction, connectionBar,
       where, machineName, machineBadge, directory, opensBox, host, terminalBody, grow, pick, typing,
       busy: false, live: false, resumeRequested: false, opensKey: null, recovery: null, recoveryError: null, recoveryKey: null, recoveryAttempts: 0,
       recoveryTimer: null, connectionTimer: null, connectingSince: null, dialog: null };
@@ -2259,7 +2357,7 @@ function broadcastView(main, id, focusExec) {
     if (!currentPanel(panel)) return;
     const title = h("h2", null, kind === "new" ? "新建对话" : kind === "choose" ? "选择要继续的对话" : kind === "identity" ? "核对原会话" : "查看终端");
     const body = h("div", { class: "connection-dialog-body" });
-    const primary = h("button", { class: "btn primary", type: "button" }, kind === "new" ? "新建" : "继续此对话");
+    const primary = h("button", { class: "btn primary", type: "button" }, kind === "new" ? "新建" : panel.current.manual_session ? "已恢复此会话" : "继续此对话");
     const cancel = h("button", { class: "btn quiet", type: "button", onclick: () => closePanelDialog(panel) }, "取消");
     const dialog = h("dialog", { class: "connection-dialog", "aria-label": title.textContent }, title, body,
       h("div", { class: "connection-dialog-actions" }, cancel, primary));
@@ -2423,7 +2521,7 @@ function broadcastView(main, id, focusExec) {
     panel.el.classList.toggle("ask", e.agent_status === "blocked");
     panel.el.classList.toggle("inactive", ["closed", "not_started"].includes(e.terminal_state));
     panel.dot.className = `dot ${tone(e.state)}`;
-    const kind = ({ claude: "Claude Code", codex: "Codex", pi: "Pi", opencode: "OpenCode", gemini: "Gemini" })[e.agent_kind] || e.agent_kind || "Agent";
+    const kind = ({ claude: "Claude Code", codex: "Codex", pi: "Pi", opencode: "OpenCode", gemini: "Gemini", custom: "自定义 agent" })[e.agent_kind] || e.agent_kind || "Agent";
     // Use the same real name that Herdr and herdr-web-ui show; do not invent local numbering.
     const title = e.agent_name || kind;
     if (panel.whoName.textContent !== title) panel.whoName.textContent = title;
@@ -2437,6 +2535,11 @@ function broadcastView(main, id, focusExec) {
     panel.state.className = `state c-${tone(e.state)}`;
     const round = findBroadcast(broadcastId())?.rounds?.find(r => r.id === e.round_id);
     panel.state.textContent = `${round ? `第 ${round.number} 轮` : "最近任务"}：${label(e.state)}${activity}`;
+    const binding = identityPresentation(e);
+    panel.identityLabel.textContent = binding.label;
+    panel.identityHelp.textContent = binding.help;
+    panel.identityId.textContent = e.session_value || "";
+    panel.identityId.hidden = !e.session_value;
     panel.state.title = "广播记录表示发送结果；Agent 状态是当前状态，不能据此判断这条消息是否执行完成。";
     const machineName = e.machine_label || e.machine_id;
     if (panel.machineName.textContent !== machineName) panel.machineName.textContent = machineName;
@@ -2590,6 +2693,28 @@ function broadcastView(main, id, focusExec) {
     clearInterval(ticker);
     observer.disconnect();
   } };
+}
+
+/** Binding is independent of submission and current agent activity. */
+function identityPresentation(e) {
+  const check = e.identity_check;
+  const reasons = {
+    report_timeout: "本轮等待已结束，期间未收到原生会话标识。",
+    proof_timeout: "已收到原生会话标识，但在等待期限内未能核实本轮输入。",
+    unsupported: "此 agent 尚不支持延迟身份的自动核验，请人工核对会话。",
+    unavailable: "已收到原生会话标识，但无法读取对应会话记录完成核验。",
+    changed: "核验期间终端或会话身份不一致，未自动绑定。",
+    cancelled: "本轮身份核验已中断，可人工核对当前会话。",
+  };
+  let reason = reasons[check?.state] || "";
+  if (check?.state === "unavailable" && !check.reported_at) reason = "无法读取终端的会话上报，请人工核对。";
+  if (check?.state === "unavailable" && check.reason === "read_limit") reason = "已收到原生会话标识，但对应会话记录超过读取限制，未完成核验。";
+  if (["waiting_report", "verifying"].includes(check?.state) && e.identity_state !== "pending") reason = "上次身份核验未完成；服务不会自动重试，可人工核对当前会话。";
+  const suffix = reason + "关闭浏览器标签不会停止 agent；再次打开可连接仍在运行的终端。";
+  if (e.session_value) return { label: "已绑定原生会话", help: `已保存原生会话标识。即使 agent 进程退出，只要原机器上的历史仍在，点击继续对话即可按此标识恢复。${suffix}` };
+  if (e.identity_state === "pending") return { label: "正在核验原生会话", help: `本轮已提交，${check?.reported_at ? "已收到标识，正在核验对应会话记录" : "正在等待会话标识上报"}；发送成功不等于绑定成功。${suffix}` };
+  if (e.identity_state === "manual") return { label: "人工确认的终端 · 未绑定原生会话", help: `当前按你的确认使用此终端，尚未保存原生会话 ID。进程退出或服务重启后需要重新核对，可能需要手动选择历史；进程内切换会话后也请重新绑定。${suffix}` };
+  return { label: "尚未绑定原生会话", help: `安装集成用于让 agent 上报会话标识，安装成功并不表示此会话已绑定。请在终端完成 hooks 信任并返回输入框；仍无法取得标识时可人工核对。关闭 agent 进程后，可能需要手动选择历史。${suffix}` };
 }
 
 // ---- wiring -----------------------------------------------------------------------------
