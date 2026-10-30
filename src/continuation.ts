@@ -1,13 +1,17 @@
 /** Reconnect to a live conversation, or launch its exact saved session without a prompt. */
+import { randomUUID } from "node:crypto";
+import { codexInputBlock } from "./agent-launch.ts";
 import { FINAL_STATES, pidAlive, type Continuation, type Execution, type Store } from "./db.ts";
 import type { Engine } from "./engine.ts";
 import { resolveCwd, unsentNewExecution } from "./engine.ts";
-import { agentList, agentStart, herdrResult, HerdrError, paneList, workspaceCreate, workspaceList, type Created } from "./herdr.ts";
+import { agentList, agentStart, herdrResult, HerdrError, paneRead, paneList, workspaceCreate, workspaceList, type Created } from "./herdr.ts";
 import type { AgentInfo } from "./herdr-types.ts";
 import { continuationKey, conversationTarget, executionContinuation, rememberTerminalIdentity, sameSession, ConversationIdentityError, type Target } from "./conversation-target.ts";
 export { continuationKey, conversationTarget, resumeIdentityIssue } from "./conversation-target.ts";
 import { sessionFileReadable } from "./session-file.ts";
 import { discoverSession } from "./session-discovery.ts";
+import { agentCapability, nativeResumeArgs } from "./agents.ts";
+import { confirmManual, refreshManual } from "./manual-session.ts";
 
 export class RestoreUnavailableError extends Error {}
 
@@ -26,27 +30,21 @@ function recoverAbandonedRestore(store: Store, e: Execution): void {
 
 /** Exact saved sessions; selecting one manually is a separate, explicit operation. */
 export function resumeArgs(e: Execution): string[] | null {
-  if (e.agent_kind === "pi" && e.session_kind === "path" && e.session_value?.startsWith("/")
-    && e.session_value.endsWith(".jsonl") && !/[\x00-\x1f\x7f]/.test(e.session_value)) return ["--session", e.session_value];
-  if (e.session_kind !== "id" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(e.session_value ?? "")) return null;
-  if (e.agent_kind === "claude") return ["--resume", e.session_value!];
-  if (e.agent_kind === "codex") return ["resume", e.session_value!];
-  if (e.agent_kind === "pi") return ["--session", e.session_value!];
-  return null;
+  return nativeResumeArgs(e.agent_kind, e.session_kind, e.session_value);
 }
 
 export function sessionPickerArgs(kind: string | null): string[] | null {
-  if (kind === "claude" || kind === "pi") return ["--resume"];
-  if (kind === "codex") return ["resume"];
-  return null;
+  const args = agentCapability(kind)?.picker;
+  return args?.length ? [...args] : null;
 }
 
 export function resumeUnavailable(e: Execution, chooseSession = false): string | null {
   if (!FINAL_STATES.includes(e.state)) return "本次发送尚未结束，请稍后恢复会话";
+  if (e.agent_kind === "custom") return e.cwd ? null : "未保存原工作目录，无法打开恢复终端";
   if (!e.session_value) {
     if (!chooseSession) return "未保存原会话标识，请打开 agent 手动选择原会话";
-    if (!sessionPickerArgs(e.agent_kind)) return "此 agent 暂不支持从本页打开会话选择器";
-  } else if (!resumeArgs(e)) return "此会话暂不支持自动恢复（支持 Claude Code、Codex、Pi 的会话 ID，以及 Pi 会话文件）";
+    // Other kinds open a plain terminal for explicit, process-bound manual recovery.
+  } else if (!resumeArgs(e)) return "此会话标识无效或不支持准确恢复，请核对原生会话标识";
   if (!e.cwd) return "未保存原工作目录，无法恢复会话";
   return null;
 }
@@ -70,6 +68,13 @@ export function continuationInfo(store: Store, engine: Engine, e: Execution) {
     recoverAbandonedRestore(store, e);
     const target = conversationTarget(store, e, view.agents, view.panes, view.workspaces);
     const saved = executionContinuation(store, e);
+    if (e.agent_kind === "custom" || saved?.manual_required) return {
+      execution: target?.execution ?? e, terminal_state: target ? target.mode === "reconnect" ? "live" : "restoring" : "closed",
+      can_resume: !target && !resumeUnavailable(e, true), resume_mode: "manual", restore_kind: "manual",
+      can_confirm_session: target?.mode === "inspect", can_abandon_restore: target?.mode === "inspect" && !!saved,
+      resume_reason: target?.mode === "reconnect" ? null : "请在原机器的终端自行启动 agent、选择原历史，再点击「已恢复此会话」。人工模式无法检测进程内切换会话，切换后请重新绑定。",
+      identity_state: target?.mode === "reconnect" ? "manual" : "unknown",
+    };
     if (target?.mode !== "reconnect" && saved?.failure_kind === "unavailable") return { execution: target?.execution || e,
       terminal_state: "closed", can_resume: false, restore_unavailable: true, resume_reason: saved.error };
     if (target) {
@@ -94,7 +99,7 @@ export function continuationInfo(store: Store, engine: Engine, e: Execution) {
         can_abandon_restore: target.mode === "inspect" && !!binding && binding.status !== "starting",
         resume_reason: target.mode === "inspect" ? reason : null, can_resume: false };
     }
-    const choose = !e.session_value && !!sessionPickerArgs(e.agent_kind);
+    const choose = !e.session_value;
     if (e.state === "starting") return { execution: e, terminal_state: "not_started", can_resume: false, resume_reason: "正在准备 agent，启动后自动连接并发送任务。" };
     if (["failed", "lost"].includes(e.state) && unsentNewExecution(e)) return { execution: e, terminal_state: "not_started", can_resume: false,
       resume_reason: "Agent 未能启动，任务尚未发送。修复启动条件后，可点击「再次发送本轮任务」在新终端中重试。" };
@@ -152,6 +157,8 @@ export class Conversations {
     const machine = this.engine.machine(e.machine_id);
     if (!machine?.enabled) throw new Error("这台机器不存在或已停用");
     const [agents, panes, workspaces] = await Promise.all([agentList(e.machine_id), paneList(e.machine_id), workspaceList(e.machine_id)]);
+    const binding = executionContinuation(this.store, e);
+    if (binding?.manual_required) await refreshManual(e.machine_id, binding);
     recoverAbandonedRestore(this.store, e);
     return conversationTarget(this.store, e, agents, panes, workspaces);
   }
@@ -160,22 +167,50 @@ export class Conversations {
   async confirmSession(e: Execution, terminalId: unknown): Promise<void> {
     if (!this.engine.machine(e.machine_id)?.enabled) throw new Error("机器不可用，请先恢复机器连接");
     const [agents, panes] = await Promise.all([agentList(e.machine_id), paneList(e.machine_id)]);
+    if (e.agent_kind === "custom" || executionContinuation(this.store, e)?.manual_required) {
+      if (!FINAL_STATES.includes(this.store.execution(e.id)?.state ?? e.state)) throw new Error("本次发送尚未结束，请稍后确认会话");
+      const binding = executionContinuation(this.store, e);
+      const pane = panes.find(p => p.pane_id === (binding?.pane_id ?? e.pane_id) && p.terminal_id === terminalId && p.terminal_id === (binding?.terminal_id ?? e.terminal_id));
+      if (!pane) throw new Error("终端已变化，请刷新后确认");
+      if (e.agent_kind === "codex") {
+        const blocked = codexInputBlock(await paneRead(e.machine_id, pane.pane_id, 40, "visible"));
+        if (blocked) throw new Error(blocked);
+      }
+      const confirmed = await confirmManual(this.store, e.machine_id, pane, continuationKey(e), binding?.workspace_label ?? e.workspace_label ?? "自定义 agent", e.agent_kind === "codex" ? "codex" : undefined);
+      if (agentCapability(e.agent_kind) && !e.session_value) this.store.saveContinuation({ ...confirmed, confirmed_session: true,
+        native_pending: { token: randomUUID(), execution_id: e.id } });
+      await this.engine.refresh(e.machine_id); this.changed(); return;
+    }
     const current = this.store.execution(e.id);
     if (!current || continuationKey(current) !== continuationKey(e)) throw new Error("会话身份已变化，请刷新后确认");
     recoverAbandonedRestore(this.store, e);
     const target = conversationTarget(this.store, e, agents, panes);
     if (!target || typeof terminalId !== "string" || target.execution.terminal_id !== terminalId) throw new Error("终端已变化，请刷新后确认");
     if (target.mode === "reconnect") return;
+    if (e.agent_kind === "codex" && !e.session_value && !agents.find(a => a.terminal_id === terminalId)?.agent_session?.value) {
+      const t = target.execution;
+      const blocked = codexInputBlock(await paneRead(e.machine_id, t.pane_id!, 40, "visible"));
+      if (blocked) throw new Error(blocked);
+      const pane = panes.find(p => p.pane_id === t.pane_id && p.terminal_id === terminalId);
+      if (!pane) throw new Error("终端已变化，请重新确认");
+      const binding = await confirmManual(this.store, e.machine_id, pane, continuationKey(e), t.workspace_label || "对话", "codex");
+      this.store.saveContinuation({ ...binding, confirmed_session: true, native_pending: { token: randomUUID(), execution_id: e.id } });
+      await this.engine.refresh(e.machine_id); this.changed(); return;
+    }
     if (target.unverified_original) {
       const t = target.execution;
       const agent = agents.find(a => a.pane_id === t.pane_id && a.terminal_id === terminalId)!;
       const session = agent.agent_session?.agent === e.agent_kind ? agent.agent_session : null;
       const confirmed = !e.session_value && session?.value ? { ...e, session_kind: session.kind, session_value: session.value } : e;
       const binding: Continuation = { key: continuationKey(confirmed), pane_id: t.pane_id!, terminal_id: t.terminal_id!, workspace_id: t.workspace_id!,
-        tab_id: t.tab_id!, workspace_label: t.workspace_label || "对话", status: "launched", confirmed_session: true, select_session: false, error: null };
+        tab_id: t.tab_id!, workspace_label: t.workspace_label || "对话", status: "launched", confirmed_session: true, select_session: false, error: null,
+        ...(!confirmed.session_value && agentCapability(e.agent_kind) ? { native_pending: { token: randomUUID(), execution_id: e.id } } : {}) };
       this.store.db.transaction(() => {
         if (!e.session_value) {
-          if (confirmed.session_value) this.store.update(e.id, { session_kind: confirmed.session_kind, session_value: confirmed.session_value });
+          if (confirmed.session_value) {
+            this.store.update(e.id, { session_kind: confirmed.session_kind, session_value: confirmed.session_value });
+            this.store.rememberIdentitySource({ ...t, session_kind: confirmed.session_kind, session_value: confirmed.session_value }, "manual");
+          }
           this.store.saveContinuation(binding);
         }
         rememberTerminalIdentity(this.store, confirmed, binding);
@@ -184,7 +219,8 @@ export class Conversations {
     }
     const binding = this.store.continuation(continuationKey(e));
     if (!binding || !confirmationReady(e, binding, agents)) throw new Error("请先在恢复终端里打开原会话，等待 agent 就绪后再确认");
-    this.store.saveContinuation({ ...binding, status: "launched", confirmed_session: true, select_session: false, error: null });
+    this.store.saveContinuation({ ...binding, status: "launched", confirmed_session: true, select_session: false, error: null,
+      ...(!e.session_value && agentCapability(e.agent_kind) ? { native_pending: { token: randomUUID(), execution_id: e.id } } : {}) });
     rememberTerminalIdentity(this.store, e, binding);
     await this.engine.refresh(e.machine_id);
     this.changed();
@@ -216,27 +252,31 @@ export class Conversations {
       if (automatic) return { mode: "manual", message: "对话已关闭；需要时请点击「继续对话」。" };
       const broadcast = this.store.getBroadcast(e.broadcast_id)!;
       let discoveryNote: string | undefined;
-      if (chooseSession && !e.session_value && !resumeUnavailable(e, true)) {
+      if (chooseSession && !e.session_value && sessionPickerArgs(e.agent_kind) && !resumeUnavailable(e, true)) {
         const found = await this.discover(e, { ...broadcast, prompt: this.store.getRound(e.round_id)!.prompt });
         if (found.status === "found" && found.session && resumeArgs({ ...e, session_kind: found.session.kind, session_value: found.session.value })) {
           this.store.update(e.id, { session_kind: found.session.kind, session_value: found.session.value });
+          this.store.rememberIdentitySource(this.store.execution(e.id)!, "history");
           // All broadcasts of a discovered session share the same launch lock.
           return await this.continue(this.store.execution(e.id)!, false, automatic);
         }
         discoveryNote = found.status === "ambiguous" ? "找到多个可能的历史会话，需要你手动选择。"
           : found.status === "unavailable" ? "历史记录暂时无法完整读取，已改为手动选择。" : "未找到唯一匹配的历史记录，已改为手动选择。";
       }
-      const selecting = chooseSession && !e.session_value;
+      const selecting = (chooseSession || this.store.continuation(key)?.manual_required === true) && !e.session_value;
+      const manualRecovery = e.agent_kind === "custom" || (selecting && !sessionPickerArgs(e.agent_kind));
       const reason = resumeUnavailable(e, selecting);
       if (reason) throw new Error(reason);
-      if (e.agent_kind === "pi" && e.session_kind === "path" && !await this.fileReadable(e.machine_id, e.session_value!)) {
-        throw new RestoreUnavailableError("原机器上的 Pi 会话文件不存在、为空或不可读，无法恢复原对话");
+      if (e.session_kind === "path" && !await this.fileReadable(e.machine_id, e.session_value!)) {
+        throw new RestoreUnavailableError("原机器上的会话文件不存在、为空或不可读，无法恢复原对话");
       }
       const previous = this.store.continuation(key);
       if (previous && previous.status !== "ready") {
         const panes = await paneList(e.machine_id);
         if (panes.some((p) => p.pane_id === previous.pane_id && p.terminal_id === previous.terminal_id)) throw new Error("之前的恢复终端仍在，请先在 Herdr 中检查或关闭它；不会重复启动会话");
       }
+      const launchArgs = manualRecovery ? [] : await this.engine.launchArgs(e.machine_id, e.agent_kind!,
+        selecting ? sessionPickerArgs(e.agent_kind)! : resumeArgs(e)!);
       const created: Created = await workspaceCreate(e.machine_id, { cwd: resolveCwd(e.machine_id, e.cwd!), label: Array.from(`继续 · ${broadcast.title}`).slice(0, 36).join("") });
       const pane = created.root_pane;
       if (!pane?.pane_id || !pane.terminal_id) throw new Error("Herdr 没有返回恢复终端的完整信息，请在 Herdr 中检查");
@@ -244,13 +284,17 @@ export class Conversations {
         tab_id: pane.tab_id, workspace_label: created.workspace?.label ?? "继续对话", status: "starting", error: null, select_session: selecting, discovery_note: discoveryNote };
       this.store.saveContinuation(binding);
       this.changed();
+      if (manualRecovery) {
+        this.store.saveContinuation({ ...binding, status: "uncertain", manual_required: true, identity_source: "manual", select_session: false });
+        return { mode: "manual", message: "请在此终端启动 agent 并选择原历史，再点击「已恢复此会话」；未发送历史任务。" };
+      }
       // This is deliberately not engine.retry(): the broadcast prompt is never submitted.
       const name = `resume-${e.id}-${Date.now().toString(36)}`;
       let startSucceeded = false;
       for (let attempt = 0; ; attempt++) {
         try {
           await agentStart(e.machine_id, { name, kind: e.agent_kind!, pane: pane.pane_id,
-            args: selecting ? sessionPickerArgs(e.agent_kind)! : resumeArgs(e)!, timeoutMs: selecting ? 5_000 : 90_000 });
+            args: launchArgs, timeoutMs: selecting ? 5_000 : 90_000 });
           startSucceeded = true;
           break;
         } catch (error) {

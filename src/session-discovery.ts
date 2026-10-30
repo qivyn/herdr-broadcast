@@ -1,11 +1,16 @@
-/** Read-only, bounded historical lookup. A unique exact prompt/time/cwd match is required. */
+/** Read-only native evidence: candidate verification and conservative unknown-identity discovery. */
 import type { Broadcast, Execution } from "./db.ts";
 import { LOCAL, machineList, type MachineProfile } from "./herdr.ts";
+import { shellQuote } from "./machine-command.ts";
 import { parseTarget } from "./web/ssh.ts";
+import { nativeResumeArgs } from "./agents.ts";
 
 export interface DiscoveredSession { kind: "id" | "path"; value: string }
-export interface SessionDiscovery { status: "found" | "none" | "ambiguous" | "unavailable"; session?: DiscoveredSession }
-export interface SessionQuery { agent: string; cwd: string; prompt: string; sentAt: number; store?: string }
+export const PROOF_FAILURES = ["unsupported_agent", "invalid_identity", "read_limit", "read_timeout", "unreadable", "incomplete", "identity_mismatch"] as const;
+export type ProofFailure = typeof PROOF_FAILURES[number];
+export interface SessionDiscovery { status: "found" | "none" | "ambiguous" | "unavailable"; session?: DiscoveredSession; reason?: ProofFailure }
+export interface SessionQuery { agent: string; cwd: string; prompt: string; sentAt: number; store?: string; expected?: DiscoveredSession }
+export const canVerifySession = (agent: string | null) => ["codex", "claude", "pi"].includes(agent ?? "");
 
 // Kept in the source so local and SSH lookups use exactly the same parser. Only matching
 // identifiers leave the machine; prompts travel over stdin, never command-line arguments.
@@ -35,6 +40,16 @@ def canonical(value):
 def scan(q):
     agent, cwd = q['agent'], canonical(q['cwd'])
     prompt, sent = plain(q['prompt']), q['sentAt']
+    expected = q.get('expected')
+    def fail(reason):
+        return {'status': 'unavailable', **({'reason': reason} if expected else {})}
+    if expected:
+        if agent not in ('pi', 'claude', 'codex'): return fail('unsupported_agent')
+        kind, value = expected.get('kind'), expected.get('value')
+        if not isinstance(value, str) or len(value) > 4096 or any(ord(c) < 32 or ord(c) == 127 for c in value): return fail('invalid_identity')
+        if kind == 'path':
+            if agent != 'pi' or not os.path.isabs(value) or not value.endswith('.jsonl'): return fail('invalid_identity')
+        elif kind != 'id' or not UUID.fullmatch(value): return fail('invalid_identity')
     if agent not in ('pi', 'claude', 'codex') or not cwd or not prompt or not isinstance(sent, (int, float)):
         return {'status': 'none'}
     home = os.path.expanduser('~')
@@ -54,27 +69,40 @@ def scan(q):
     else:
         store = q.get('store') or os.environ.get('CODEX_HOME') or os.path.join(home, '.codex')
         patterns = [os.path.join(store, 'sessions', '*', '*', '*', '*.jsonl'), os.path.join(store, 'archived_sessions', '*.jsonl')]
+    # A live reported identity is already a candidate. Never search unrelated transcript
+    # contents to prove it. Filenames only locate candidates; their contents must agree.
+    if expected:
+        value = expected['value']
+        if expected['kind'] == 'path': patterns = []
+        elif agent == 'codex': patterns = [os.path.join(store, 'sessions', '*', '*', '*', '*-' + value + '.jsonl'), os.path.join(store, 'archived_sessions', '*-' + value + '.jsonl')]
+        elif agent == 'claude': patterns = [os.path.join(store, 'projects', '*', value + '.jsonl')]
+        else: patterns = [os.path.join(store, '*_' + value + '.jsonl'), os.path.join(store, '*', '*_' + value + '.jsonl')]
     files, seen = [], set()
+    if expected and expected['kind'] == 'path': files = [canonical(expected['value'])]
     deadline = time.monotonic() + 8
     for pattern in patterns:
         for file in glob.iglob(pattern):
             path = os.path.realpath(file)
             if path in seen: continue
             seen.add(path); files.append(path)
-            if len(files) > MAX_FILES or time.monotonic() > deadline: return {'status': 'unavailable'}
+            if len(files) > MAX_FILES: return fail('read_limit')
+            if time.monotonic() > deadline: return fail('read_timeout')
     matches, read = [], 0
     for path in files:
-        if time.monotonic() > deadline: return {'status': 'unavailable'}
+        if time.monotonic() > deadline: return fail('read_timeout')
+        if expected and not os.path.isfile(path): return {'status': 'none'}
         session_id, session_cwd, matched = None, None, False
         with open(path, 'rb') as f:
             while True:
                 line = f.readline(MAX_LINE + 1)
                 if not line: break
                 read += len(line)
-                if len(line) > MAX_LINE or read > MAX_BYTES or time.monotonic() > deadline: return {'status': 'unavailable'}
+                if len(line) > MAX_LINE or read > MAX_BYTES: return fail('read_limit')
+                if time.monotonic() > deadline: return fail('read_timeout')
                 if not line.strip(): continue
                 # An unreadable/incomplete transcript prevents proving uniqueness.
-                entry = json.loads(line)
+                try: entry = json.loads(line)
+                except (ValueError, UnicodeDecodeError): return fail('incomplete' if not line.endswith(b'\n') else 'unreadable')
                 if not isinstance(entry, dict): return {'status': 'unavailable'}
                 if agent == 'pi':
                     if entry.get('type') == 'session':
@@ -96,18 +124,21 @@ def scan(q):
                         if session_cwd != cwd: break
                     content = payload.get('content') if entry.get('type') == 'response_item' and payload.get('role') == 'user' else None
                     when = timestamp(entry.get('timestamp'))
+                if expected and session_id is not None and expected['kind'] == 'id' and session_id != expected['value']: return fail('identity_mismatch')
                 if session_cwd == cwd and isinstance(session_id, str) and UUID.fullmatch(session_id) and when is not None and abs(when - sent) <= 10000 and plain(content) == prompt:
                     matched = True
                     found_id = session_id
+                    if expected: break # Later output cannot undo evidence of this input.
             if matched:
-                matches.append({'kind': 'path' if agent == 'pi' else 'id', 'value': path if agent == 'pi' else found_id})
+                matches.append(expected if expected else {'kind': 'path' if agent == 'pi' else 'id', 'value': path if agent == 'pi' else found_id})
                 if len(matches) > 1: return {'status': 'ambiguous'}
     return {'status': 'found', 'session': matches[0]} if len(matches) == 1 else {'status': 'none'}
 
 try:
-    print(json.dumps(scan(json.load(sys.stdin))))
+    q = json.load(sys.stdin)
+    print(json.dumps(scan(q)))
 except Exception:
-    print(json.dumps({'status': 'unavailable'}))
+    print(json.dumps({'status': 'unavailable', **({'reason': 'unreadable'} if globals().get('q', {}).get('expected') else {})}))
 `;
 
 export function discoveryCommand(profile?: MachineProfile): string[] {
@@ -116,24 +147,38 @@ export function discoveryCommand(profile?: MachineProfile): string[] {
   const quoted = `'${sessionScanner.replace(/'/g, `'\\''`)}'`;
   return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
     ...(target.port ? ["-p", String(target.port)] : []), "--", target.user ? `${target.user}@${target.host}` : target.host,
-    `python3 -c ${quoted}`];
+    `exec "${"${SHELL:-/bin/sh}"}" -lc ${shellQuote(`python3 -c ${quoted}`)}`];
 }
 
 export async function scanSessionHistory(query: SessionQuery, profile?: MachineProfile, env = process.env): Promise<SessionDiscovery> {
   let proc: ReturnType<typeof Bun.spawn<"pipe", "pipe", "pipe">> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
     proc = Bun.spawn(discoveryCommand(profile), { stdin: "pipe", stdout: "pipe", stderr: "pipe", env });
-    timer = setTimeout(() => proc?.kill(), 12_000);
+    timer = setTimeout(() => { timedOut = true; proc?.kill(); }, 12_000);
     proc.stdin.write(JSON.stringify(query)); proc.stdin.end();
     const [code, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    if (code !== 0) return { status: "unavailable" };
+    if (code !== 0) return { status: "unavailable", reason: timedOut ? "read_timeout" : "unreadable" };
     const result = JSON.parse(stdout) as SessionDiscovery;
     if (!["found", "none", "ambiguous", "unavailable"].includes(result.status)) return { status: "unavailable" };
     if (result.status === "found" && (!result.session || !["id", "path"].includes(result.session.kind) || typeof result.session.value !== "string")) return { status: "unavailable" };
+    if (result.reason && !PROOF_FAILURES.includes(result.reason)) return { status: "unavailable", reason: "unreadable" };
     return result;
   } catch { return { status: "unavailable" }; }
   finally { clearTimeout(timer); }
+}
+
+/** Validate this live submission against its reported session, distinct from discovering unknown history. */
+export async function verifyReportedSession(e: Execution, b: Broadcast, expected: DiscoveredSession): Promise<SessionDiscovery> {
+  if (!canVerifySession(e.agent_kind)) return { status: "unavailable", reason: "unsupported_agent" };
+  if (!nativeResumeArgs(e.agent_kind, expected.kind, expected.value)) return { status: "unavailable", reason: "invalid_identity" };
+  if (!e.cwd || !e.sent_at || !e.agent_kind) return { status: "unavailable", reason: "unreadable" };
+  try {
+    const profile = e.machine_id === LOCAL ? undefined : (await machineList()).find(m => m.id === e.machine_id && m.enabled);
+    if (e.machine_id !== LOCAL && !profile) return { status: "unavailable", reason: "unreadable" };
+    return await scanSessionHistory({ agent: e.agent_kind, cwd: e.cwd, prompt: b.prompt, sentAt: e.sent_at, expected }, profile);
+  } catch { return { status: "unavailable", reason: "unreadable" }; }
 }
 
 export async function discoverSession(e: Execution, b: Broadcast): Promise<SessionDiscovery> {

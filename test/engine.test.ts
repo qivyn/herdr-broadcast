@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Store, type NewExecution } from "../src/db.ts";
 import { Engine, launchFailureText } from "../src/engine.ts";
 import { continuationInfo } from "../src/continuation.ts";
-import { FakeHerdr, until, type FakeAgent } from "./helpers.ts";
+import { fakeLaunchArgs, FakeHerdr, until, type FakeAgent } from "./helpers.ts";
 
 let fake: FakeHerdr, store: Store, engines: Engine[];
 const session = "01234567-1234-4567-89ab-0123456789ab";
@@ -10,7 +10,7 @@ const existing = (a: FakeAgent, machine = "local"): NewExecution => ({ machine_i
   target_kind: "existing", agent_kind: a.agent, pane_id: a.pane_id, terminal_id: a.terminal_id, cwd: a.cwd });
 const fresh = (machine = "local", slot = 1, cwd = "/src", kind = "claude"): NewExecution => ({ machine_id: machine, machine_label: machine,
   target_kind: "new", agent_kind: kind, cwd, slot });
-function engine(other = store, timing: ConstructorParameters<typeof Engine>[2] = {}) { const e = new Engine(other, () => {}, { tickMs: 20, localPollMs: 40, remotePollMs: 40, launchPollMs: 40, ...timing }); engines.push(e); return e; }
+function engine(other = store, timing: ConstructorParameters<typeof Engine>[2] = {}) { const e = new Engine(other, () => {}, { tickMs: 20, localPollMs: 40, remotePollMs: 40, launchPollMs: 40, identityWaitMs: 0, ...timing }, fakeLaunchArgs); engines.push(e); return e; }
 function record(targets: NewExecution[], prompt = "hello") { return store.createBroadcast({ title: prompt, prompt, executions: targets }); }
 async function submit(id: number, e = engine()) { await e.refreshMachines(); e.submit(store.rounds(id)[0]!.id); return e; }
 const result = (id: number) => store.executions(id)[0]!;
@@ -315,4 +315,60 @@ test("legacy queued records without proof of non-delivery remain uncertain acros
   expect(result(id).state).toBe("uncertain"); expect(result(id).note).toContain("无法确认");
   expect(fake.server().prompts).toEqual([]);
   const migrated = result(id); store.retireLegacyQueue(); expect(result(id)).toEqual(migrated);
+});
+
+test("Antigravity identity arriving with a send receipt belongs only to that send", async () => {
+  const a = fake.addAgent("local", "agy");
+  const old = record([existing(a)]), runner = await submit(old); await runner.settle();
+  const reference = { agent: "agy", kind: "id", source: "herdr:antigravity-cli", value: "conversation_abc123" };
+  fake.mutate(s => { s.servers.local!.promptReply = { agent_session: reference }; });
+  const id = record([existing(a)]); runner.submit(store.rounds(id)[0]!.id); await runner.settle();
+  expect(result(id)).toMatchObject({ state: "sent", session_value: reference.value });
+  expect(store.continuation(`identity:${result(id).id}`)?.identity_source).toBe("prompt");
+  fake.mutate(s => { s.servers.local!.agents[0]!.agent_session = reference; });
+  await runner.refresh("local");
+  expect(result(old).session_value).toBeNull();
+  expect(fake.server().prompts).toHaveLength(2);
+});
+
+test("Codex hooks manager cannot receive task input despite Herdr reporting idle", async () => {
+  const a = fake.addAgent("local", "codex");
+  fake.mutate(s => { s.servers.local!.screens = { [a.pane_id]: "  Hooks\n  Lifecycle hooks from config and enabled plugins.\n  t trust all · enter review · esc close\n" }; });
+  const id = record([existing(a)]), runner = await submit(id);
+  await runner.settle();
+  expect(result(id)).toMatchObject({ state: "failed", input_attempted: 0 });
+  expect(fake.server().prompts).toHaveLength(0);
+});
+
+for (const outcome of ["ready", "cancel", "timeout", "stop"] as const) test(`Codex new broadcast waits at hook review, then ${outcome} without replay`, async () => {
+  fake.mutate(s => { s.servers.local!.startScreen = "Hooks need review\nenter confirm · esc skip"; });
+  const id = record([fresh("local", 1, "/src", "codex")]), runner = engine(store, { startupConfirmMs: outcome === "timeout" ? 700 : 4000 });
+  await submit(id, runner);
+  await until(() => runner.canCancelStartup(result(id).id));
+  expect(result(id)).toMatchObject({ state: "starting", input_attempted: 0, sent_at: null });
+  expect(fake.server().prompts).toHaveLength(0);
+  if (outcome === "ready") fake.mutate(s => { s.servers.local!.screens![result(id).pane_id!] = "›\n100% context left"; });
+  if (outcome === "cancel") runner.cancelStartup(result(id).id);
+  if (outcome === "stop") runner.stop();
+  await runner.settle();
+  expect(result(id).state).toBe(outcome === "ready" ? "sent" : outcome === "cancel" ? "cancelled" : "failed");
+  expect(fake.server().prompts).toHaveLength(outcome === "ready" ? 1 : 0);
+  fake.mutate(s => { s.servers.local!.screens![result(id).pane_id!] = "›"; });
+  await runner.refresh("local");
+  expect(fake.server().prompts).toHaveLength(outcome === "ready" ? 1 : 0);
+  expect(fake.calls().find(c => c.includes('["agent","start"'))).toContain('"--no-daemon"');
+});
+
+test("pausing ends only the live identity check; restart and polls cannot replay or resume it", async () => {
+  const a = fake.addAgent("local", "codex"), id = record([existing(a)]);
+  const runner = engine(store, { identityWaitMs: 30_000 });
+  await submit(id, runner);
+  await until(() => result(id).state === "sent" && runner.identityPending(result(id).id));
+  runner.pause(); await runner.settle();
+  expect(runner.identityPending(result(id).id)).toBe(false);
+  fake.mutate(s => { s.servers.local!.agents[0]!.agent_session = { agent: "codex", kind: "id", value: session, source: "herdr:codex" }; });
+  await runner.refresh("local");
+  const restarted = engine(); await restarted.refresh("local");
+  expect(result(id).session_value).toBeNull();
+  expect(fake.server().prompts).toHaveLength(1);
 });

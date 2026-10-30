@@ -91,7 +91,7 @@ export interface Execution {
 }
 
 export type NewExecution = Pick<Execution, "machine_id" | "machine_label" | "target_kind"> &
-  Partial<Pick<Execution, "agent_kind" | "agent_name" | "cwd" | "slot" | "workspace_id" | "workspace_label" | "tab_id" | "pane_id" | "terminal_id" | "session_kind" | "session_value">>;
+  Partial<Pick<Execution, "agent_kind" | "agent_name" | "cwd" | "slot" | "workspace_id" | "workspace_label" | "tab_id" | "pane_id" | "terminal_id" | "session_kind" | "session_value">> & { continuation_source?: string; parent_execution_id?: number };
 
 /** A replacement terminal for a saved conversation; the original broadcast stays immutable. */
 export interface Continuation {
@@ -109,6 +109,22 @@ export interface Continuation {
   confirmed_session?: boolean;
   discovery_note?: string;
   failure_kind?: "unavailable";
+  identity_source?: "start" | "query" | "prompt" | "history" | "picker" | "manual";
+  identity_check?: IdentityCheck;
+  manual_required?: boolean;
+  manual_process?: import("./manual-session.ts").ManualProcess;
+  parent_execution_id?: number;
+  /** Explicit confirmation whose native identity is still pending. Copied only along follow-up rounds. */
+  native_pending?: { token: string; execution_id: number };
+}
+
+/** Diagnostic evidence only; never authorizes input or creates a retry job. */
+export interface IdentityCheck {
+  state: "waiting_report" | "verifying" | "bound" | "report_timeout" | "proof_timeout" | "unavailable" | "unsupported" | "changed" | "cancelled";
+  reason?: import("./session-discovery.ts").ProofFailure;
+  started_at: number;
+  reported_at?: number;
+  finished_at?: number;
 }
 
 export const SCHEMA_VERSION = 9;
@@ -293,8 +309,12 @@ export class Store {
         workspace_id, workspace_label, tab_id, pane_id, terminal_id, session_kind, session_value, input_attempted, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'submitting', ?, ?)`);
       for (const e of executions) {
-        row.run(broadcastId, round.id, e.machine_id, e.machine_label, e.target_kind, e.agent_kind ?? null, e.agent_name ?? null, e.cwd ?? null, e.slot ?? 0,
+        const inserted = row.run(broadcastId, round.id, e.machine_id, e.machine_label, e.target_kind, e.agent_kind ?? null, e.agent_name ?? null, e.cwd ?? null, e.slot ?? 0,
           e.workspace_id ?? null, e.workspace_label ?? null, e.tab_id ?? null, e.pane_id ?? null, e.terminal_id ?? null, e.session_kind ?? null, e.session_value ?? null, now, now);
+        const binding = e.continuation_source ? this.continuation(e.continuation_source) : null;
+        if (binding && binding.pane_id === e.pane_id && binding.terminal_id === e.terminal_id) {
+          this.saveContinuation({ ...binding, key: `execution:${inserted.lastInsertRowid}`, parent_execution_id: e.parent_execution_id });
+        }
       }
       return round;
     }).immediate();
@@ -354,6 +374,20 @@ export class Store {
   saveContinuation(value: Continuation): void {
     this.db.query("INSERT INTO continuations (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data")
       .run(value.key, JSON.stringify(value));
+  }
+
+  rememberIdentitySource(e: Execution, source: NonNullable<Continuation["identity_source"]>): void {
+    if (!e.pane_id || !e.terminal_id || !e.session_value) return;
+    this.saveContinuation({ key: `identity:${e.id}`, pane_id: e.pane_id, terminal_id: e.terminal_id,
+      workspace_id: e.workspace_id ?? "", workspace_label: e.workspace_label ?? "", tab_id: e.tab_id ?? "",
+      status: "uncertain", error: null, identity_source: source });
+  }
+
+  rememberIdentityCheck(e: Execution, check: IdentityCheck): void {
+    if (!e.pane_id || !e.terminal_id || !this.execution(e.id)) return;
+    this.saveContinuation({ key: `identity:${e.id}`, pane_id: e.pane_id, terminal_id: e.terminal_id,
+      workspace_id: e.workspace_id ?? "", workspace_label: e.workspace_label ?? "", tab_id: e.tab_id ?? "",
+      status: "uncertain", error: null, ...this.continuation(`identity:${e.id}`), identity_check: check });
   }
 
   /** Keep the last real name on every broadcast referring to this conversation. */

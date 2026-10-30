@@ -1,6 +1,7 @@
 /** Conversation identity shared by tracking, sending and user actions. */
 import { ACTIVE_STATES, type Continuation, type Execution, type Store } from "./db.ts";
 import type { AgentInfo, PaneInfo, WorkspaceInfo } from "./herdr-types.ts";
+import { manualValid } from "./manual-session.ts";
 
 export const continuationKey = (e: Execution) => e.session_value
   ? JSON.stringify([e.machine_id, e.agent_kind, e.session_kind, e.session_value]) : `execution:${e.id}`;
@@ -94,6 +95,11 @@ export function conversationTarget(store: Store, e: Execution, agents: AgentInfo
     execution.agent_kind ??= agent.agent ?? agent.display_agent ?? null;
     return { execution, mode: "reconnect" };
   };
+  if (e.agent_kind === "custom" || binding?.manual_required) {
+    const pane = panes.find(p => p.pane_id === (binding?.pane_id ?? e.pane_id) && p.terminal_id === (binding?.terminal_id ?? e.terminal_id));
+    if (!pane) return null;
+    return { execution: located(pane, binding?.workspace_label), mode: binding && manualValid(e.machine_id, binding) ? "reconnect" : "inspect", unverified_original: true };
+  }
   if (binding) {
     const pane = panes.find(p => p.pane_id === binding.pane_id && p.terminal_id === binding.terminal_id);
     const bound = agents.find(a => a.pane_id === binding.pane_id && a.terminal_id === binding.terminal_id);
@@ -103,6 +109,7 @@ export function conversationTarget(store: Store, e: Execution, agents: AgentInfo
       if (session?.value && session.agent === e.agent_kind) {
         const selected = { ...e, session_kind: session.kind, session_value: session.value };
         store.update(e.id, { session_kind: session.kind, session_value: session.value });
+        store.rememberIdentitySource(store.execution(e.id)!, "picker");
         store.saveContinuation({ ...binding, key: continuationKey(selected), select_session: false, status: "ready", error: null });
         return connected(bound, selected);
       }
