@@ -5,4 +5,5 @@ mocks:
     routeKey: github
     origin:
       - api.github.com
+      - uploads.github.com
     path: postman/mocks/github-releases

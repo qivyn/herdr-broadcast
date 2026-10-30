@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { releaseVersion } from "./publish-release.ts";
 
 const root = resolve(import.meta.dir, "..");
 const output = join(root, "dist");
@@ -19,7 +20,8 @@ try {
     cpSync(join(root, file), join(stage, file), { recursive: true });
   }
   const version = JSON.parse(readFileSync(join(stage, "package.json"), "utf8")).version as string;
-  if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version)) throw new Error("Invalid package version");
+  const manifest = Bun.TOML.parse(readFileSync(join(stage, "herdr-plugin.toml"), "utf8")) as { version?: unknown };
+  releaseVersion(version, manifest.version);
   // Use the manifest's production-install contract in a clean directory.
   await run([process.execPath, "install", "--production", "--frozen-lockfile"], stage);
   if (readFileSync(join(stage, "bun.lock"), "utf8") !== readFileSync(join(root, "bun.lock"), "utf8")) throw new Error("Install changed the lockfile");

@@ -1,6 +1,6 @@
 purpose:
-  stands_in_for: Public GitHub latest Release and repository metadata reads.
-  unblocks: Offline verification of the real release client without GitHub rate limits or credentials.
+  stands_in_for: GitHub Release metadata reads, Git tag creation, draft releases, asset uploads and stable publication.
+  unblocks: Offline verification of the updater and CI publisher without GitHub credentials or real releases.
 assumptions:
   - id: stable-release-metadata
     status: supported
@@ -8,6 +8,13 @@ assumptions:
     reason: GitHub's documented contract specifies these properties. The caller still validates the response and resolves the tag using Git.
     verification: Read the official GitHub REST contract on 2026-10-30. Ran scripts/check-release-api.ts with Postman CLI 1.77.0: 7 scenarios passed; 9 real HTTP requests were observed in the simulation log. This verifies caller behavior against synthetic responses, not a live release installation. The owner mock search was skipped because the CLI is signed out; this local mock follows the official contract.
     source: https://docs.github.com/en/rest/releases/releases#get-the-latest-release
+    updated_at: "2026-10-30"
+  - id: ci-publication-and-recovery
+    status: supported
+    claim: Publication uses a tested commit tag, uploads binary assets to a draft, and makes it a stable latest release only after uploads succeed. A failed response may follow a successful publication.
+    reason: GitHub's documented refs, releases and assets contracts support these operations. The caller checks published versions before writing, checks tag ownership, and resumes only drafts marked with the same CI commit and run ID.
+    verification: On 2026-10-30 the real publisher ran against the local Postman mock. Four publication scenarios passed including an unchanged-version repeat, an upload 502 followed by recovery, a publication 503 after the state changed followed by a read-only repeat, and a conflicting tag with no writes. Together with the seven updater scenarios, the log contained 47 modeled GitHub HTTP requests, 19 writes and five local state observations. These checks establish caller behavior against synthetic responses; no real GitHub tag or Release was created. Owner mock discovery remains skipped while signed out. Orbit supplied the upload endpoint brief; official GitHub documentation supplied the missing create/publish/auth contract. The mock interceptor consumes request streams, so its handler uses req.body.
+    source: scripts/publish-release.ts; scripts/check-release-api.ts; test/release-publish.test.ts; https://docs.github.com/en/rest/releases/releases; https://docs.github.com/en/rest/releases/assets; https://docs.github.com/en/rest/git/refs
     updated_at: "2026-10-30"
   - id: missing-release-versus-repository
     status: supported
@@ -20,4 +27,8 @@ fingerprints:
   - id: release-updater-working-tree
     date: "2026-10-30"
     commit: "0b2f086 (working tree modifications)"
+    cli: "Postman CLI 1.77.0"
+  - id: automatic-publication-working-tree
+    date: "2026-10-30"
+    commit: "a26eef5 (working tree modifications)"
     cli: "Postman CLI 1.77.0"
