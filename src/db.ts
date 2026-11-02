@@ -302,6 +302,8 @@ export class Store {
   /** Append atomically, so concurrent clients receive distinct, consecutive round numbers. */
   createRound(broadcastId: number, prompt: string, executions: NewExecution[]): Round {
     return this.db.transaction(() => {
+      const slots = new Map<string, number>();
+      for (const e of this.executions(broadcastId)) slots.set(e.machine_id, Math.max(slots.get(e.machine_id) ?? 0, e.slot));
       const now = Date.now();
       const round = this.db.query<Round, [number, string, number, number]>(`INSERT INTO broadcast_rounds (broadcast_id, number, prompt, created_at)
         SELECT ?, COALESCE(MAX(number), 0) + 1, ?, ? FROM broadcast_rounds WHERE broadcast_id = ? RETURNING *`).get(broadcastId, prompt, now, broadcastId)!;
@@ -309,7 +311,9 @@ export class Store {
         workspace_id, workspace_label, tab_id, pane_id, terminal_id, session_kind, session_value, input_attempted, state, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'submitting', ?, ?)`);
       for (const e of executions) {
-        const inserted = row.run(broadcastId, round.id, e.machine_id, e.machine_label, e.target_kind, e.agent_kind ?? null, e.agent_name ?? null, e.cwd ?? null, e.slot ?? 0,
+        const slot = e.target_kind === "new" ? (slots.get(e.machine_id) ?? 0) + 1 : e.slot ?? 0;
+        if (e.target_kind === "new") slots.set(e.machine_id, slot);
+        const inserted = row.run(broadcastId, round.id, e.machine_id, e.machine_label, e.target_kind, e.agent_kind ?? null, e.agent_name ?? null, e.cwd ?? null, slot,
           e.workspace_id ?? null, e.workspace_label ?? null, e.tab_id ?? null, e.pane_id ?? null, e.terminal_id ?? null, e.session_kind ?? null, e.session_value ?? null, now, now);
         const binding = e.continuation_source ? this.continuation(e.continuation_source) : null;
         if (binding && binding.pane_id === e.pane_id && binding.terminal_id === e.terminal_id) {

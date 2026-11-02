@@ -241,44 +241,6 @@ test("normal connections do not steal focus, and another user action cancels pen
 
 const pageScript = readFileSync(new URL("../src/web/page.js", import.meta.url), "utf8");
 
-for (const session of [
-  { session_kind: "id", session_value: "B" },
-  { session_kind: "path", session_value: "A" },
-  { session_kind: null, session_value: null },
-]) {
-  test(`target rows refresh identity callbacks (${session.session_kind}:${session.session_value}) without silently rebinding checked targets`, () => {
-    const setup = pageScript.slice(pageScript.indexOf("  const targetIdentities ="), pageScript.indexOf("  compose.picked.clear()"));
-    const render = pageScript.slice(pageScript.indexOf("  function renderTargets()"), pageScript.indexOf("  function rowText("));
-    const elements: any[] = [];
-    const a = { pane_id: "w1:p1", terminal_id: "t1", workspace: "Project", name: "same", kind: "claude", cwd: "/src", title: "same", ready: true, session_kind: "id" as string | null, session_value: "A" as string | null };
-    const compose = { picked: new Set<string>() };
-    const data = { agents: [{ machine: { id: "local", label: "Local" }, loading: false, agents: [a] }] };
-    const host = { replaceChildren() { elements.length = 0; }, append() {} };
-    const ui = runInNewContext(`(function(){let targetsShape='';let filterRows=[];${setup}\n${render}\nreturn {renderTargets,identities:targetIdentities};})()`, {
-      compose, data, loaded: true, targets: host, customSelect: { dataset: {}, value: "", replaceChildren() {} }, filter: { value: "" }, statusOf: () => ["ok", "idle"],
-      key: (m: string, p: string) => `${m}\0${p}`, statusCells: new Map(), byWorkspace: (agents: any[]) => [["Project", agents]],
-      applyFilter() {}, syncChecks() {}, updateComposer() {}, rowText: () => "", baseName: (s: string) => s, toast() {},
-      h: (tag: string, attrs: any, ...children: any[]) => {
-        const el = { tag, attrs: attrs || {}, children, append() {}, classList: { add() {} } }; elements.push(el); return el;
-      },
-    });
-    const check = () => elements.find(e => e.tag === "input" && e.attrs.type === "checkbox");
-    const chosen = () => ui.identities.get("local\0w1:p1");
-    ui.renderTargets(); check().attrs.onchange({ target: { checked: true } });
-    expect(chosen().session_value).toBe("A");
-    data.agents[0]!.agents = [{ ...a, ...session }]; ui.renderTargets();
-    expect(chosen().session_value).toBe("A"); // refreshing alone cannot replace the user's selection
-    check().attrs.onchange({ target: { checked: false } });
-    check().attrs.onchange({ target: { checked: true } });
-    expect(chosen()).toMatchObject(session);
-    // Bulk selection must also capture the new identity after a report appears again.
-    data.agents[0]!.agents = [{ ...a, session_value: "C" }]; ui.renderTargets(); compose.picked.clear();
-    const idle = elements.find(e => e.tag === "button" && e.children.includes("选中空闲的"));
-    idle.attrs.onclick();
-    expect(chosen().session_value).toBe("C");
-  });
-}
-
 function pageFunction(name: string, end: string, globals: object = {}) {
   const start = pageScript.indexOf(`  function ${name}(`);
   return runInNewContext(pageScript.slice(start, pageScript.indexOf(end, start)) + `\n${name}`, globals);
@@ -287,25 +249,21 @@ function pageFunction(name: string, end: string, globals: object = {}) {
 /** Execute the real composer's selection, refresh and submission code at its API boundary. */
 function composerHarness(post: (path: string, body: any) => Promise<any>) {
   const source = pageScript.slice(pageScript.indexOf("function newView(main)"), pageScript.indexOf("// ---- settings:"));
-  const setup = source.slice(source.indexOf("  let submitting"), source.indexOf("  compose.picked.clear()"));
-  const update = source.slice(source.indexOf("  function updateComposer()"), source.indexOf("  function refresh()"));
-  const submit = source.slice(source.indexOf("  async function submit()"), source.lastIndexOf("\n  refresh();"));
-  const finish = source.slice(source.lastIndexOf("\n  refresh();"), source.lastIndexOf("}"));
   const storage = new Map<string, string>([["draft", JSON.stringify({ title: "", prompt: "original instruction" })]]);
-  const sent: any[] = [], navigation: string[] = [], notices: string[] = [];
-  const prompt = { value: "original instruction", disabled: false }, title = { value: "", disabled: false }, send = { disabled: false, title: "" };
-  const compose = { picked: new Set<string>(), newPicks: new Map(), freshCount: () => 0, total: () => compose.picked.size };
-  const globals = {
-    compose, prompt, title, send, DRAFT_KEY: "draft", stranded: () => 0, renderChips() {},
-    tabs: Object.fromEntries(["new", "existing"].map(k => [k, { querySelector: () => ({ textContent: "", hidden: false }) }])),
-    hint: { textContent: "", classList: { toggle() {} } },
-    localStorage: { getItem: (k: string) => storage.get(k) ?? null, removeItem: (k: string) => storage.delete(k) },
+  const sent: any[] = [], navigation: string[] = [], notices: string[] = [], elements: any[] = [];
+  const h = (tag: string, attrs: any = {}, ...children: any[]) => { const el = { tag, ...attrs, value: attrs?.value || "", children, focus() {} }; elements.push(el); return el; };
+  const button: any = { disabled: false };
+  const globals = { h, DRAFT_KEY: "draft", takePrefill: () => null,
+    loadDraft: () => JSON.parse(storage.get("draft")!),
+    sendButton: (attrs: any) => Object.assign(button, attrs), topbar: (...args: any[]) => h("header", {}, ...args),
+    newAgentPicker: () => ({ el: {}, count: () => 1, specs: () => [{ machine: "local", kind: "claude", cwd: "/src", count: 1 }], lock() {}, refresh() {}, dispose() {} }),
+    localStorage: { getItem: (k: string) => storage.get(k) ?? null, removeItem: (k: string) => storage.delete(k), setItem: (k: string, v: string) => storage.set(k, v) },
     post: (path: string, body: any) => { sent.push({ path, body }); return post(path, body); },
     toast: (message: string) => notices.push(message), go: (hash: string) => navigation.push(hash),
   };
-  const view = runInNewContext(`(function () { ${setup}\n${update}\n${submit}\nfunction refresh() { updateComposer(); }\n${finish.replace("update: refresh", "pickTarget, submit, update: refresh")} })()`, globals);
-  view.pickTarget("local", { pane_id: "w1:p1", terminal_id: "terminal-original", kind: "claude", session_kind: "id", session_value: "original-session" });
-  return { view, storage, sent, navigation, notices, prompt, title, send };
+  const view = runInNewContext(source + "\nnewView", globals)({ append() {} });
+  view.submit = () => button.onclick();
+  return { view, storage, sent, navigation, notices, prompt: elements.find(e => e.tag === "textarea"), title: elements.find(e => e.tag === "input"), send: button };
 }
 
 test("new broadcast submissions stay exclusive across Enter presses and state refreshes", async () => {
@@ -317,7 +275,8 @@ test("new broadcast submissions stay exclusive across Enter presses and state re
   expect(h.prompt.disabled).toBe(true);
   await h.view.submit();
   expect(h.sent).toHaveLength(1);
-  expect(h.sent[0].body.targets).toEqual([{ machine: "local", pane: "w1:p1", terminal_id: "terminal-original", agent_kind: "claude", session_kind: "id", session_value: "original-session" }]);
+  expect(h.sent[0].body.targets).toBeUndefined();
+  expect(h.sent[0].body.new).toEqual([{ machine: "local", kind: "claude", cwd: "/src", count: 1 }]);
   resolve({ id: 3, executions: 1 }); await first;
   expect(h.navigation).toEqual(["#/b/3"]);
   expect(h.storage.has("draft")).toBe(false);
@@ -426,12 +385,14 @@ function detailHarness(options: { active?: boolean; setup?: (b: any) => void; po
   options.setup?.(b);
   const data = { state: { broadcasts: [b] }, webUi: { running: false }, agents: [] };
   const operations: string[] = []; const requests: any[] = [];
+  let pendingNew: any[] = [];
   const main = new Element("main");
   const navigation: string[] = [], stored = new Map<string, string>();
   const terminals = new Map<number, any>();
   const timers = new Map<number, { fn: () => void; due: number }>();
   let now = 0, timerSeq = 0, arrived = options.deepLink === undefined;
   const globals = {
+    newAgentPicker: () => ({ el: h("section", { class: "test-new-picker" }), count: () => pendingNew.reduce((n, p) => n + p.count, 0), specs: () => [...pendingNew], refresh() {}, lock() {}, clear() { pendingNew = []; }, dispose() {} }),
     h, data, loaded: true, config: { local: false }, SUMMARY: [], AGENT_STATUS: { working: "工作中", idle: "空闲", blocked: "等待确认" }, SHOWN: ["live", "restoring", "starting", "shell"], screenFont: { size: 14, normal: 14 }, GROW_ICON: "", SHRINK_ICON: "",
     document: { hidden: false, addEventListener() {}, removeEventListener() {} },
     IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
@@ -469,9 +430,30 @@ function detailHarness(options: { active?: boolean; setup?: (b: any) => void; po
   const create = runInNewContext(pageScript.slice(start, end) + "\nbroadcastView", globals);
   const view = options.deepLink === undefined ? create(main, 7, null) : create(main, null, options.deepLink);
   return { main, b, data, requests, operations, terminals, navigation, stored, one, all, entries, view, timers,
+    addNew(spec: any) { pendingNew.push(spec); view.update(); },
     arrive() { arrived = true; view.update(); },
     advance(ms: number) { now += ms; for (const [id, timer] of [...timers]) if (timer.due <= now) { timers.delete(id); timer.fn(); } } };
 }
+
+test("mixed follow-up preserves the existing panel and sends newly selected agents in the same request", async () => {
+  const h = detailHarness();
+  const host = h.one("terminal-host");
+  const input = h.all(h.main).find(e => e.tag === "textarea")!;
+  h.one("pick").checked = true; h.one("pick").events.change!();
+  const spec = { machine: "local", kind: "custom", cwd: "/repo", command: "offline-agent", count: 1 };
+  h.addNew(spec); input.value = "mixed next"; input.events.input!();
+  await h.one("followup-composer").events.submit!({ preventDefault() {} }); await Bun.sleep(0);
+  expect(h.requests).toEqual([{ path: "/api/broadcasts/7/follow-up", body: { prompt: "mixed next", targets: [{ execution_id: 2, terminal_id: "t1" }], new: [spec] } }]);
+  expect(h.one("terminal-host")).toBe(host); expect(h.operations).toEqual(["open:2"]);
+  expect(h.one("pick").checked).toBe(true); expect(h.data.state.broadcasts).toHaveLength(1); h.view.dispose();
+});
+
+test("custom startup has an explicit send confirmation, distinct from native startup", async () => {
+  const h = detailHarness({ setup: b => Object.assign(b.executions[1], { state: "starting", terminal_state: "starting", custom_startup_pending: true }), post: async () => ({ ok: true }) });
+  const status = h.one("terminal-status"); expect(status.textContent).toContain("尚未发送本轮输入");
+  await status.children[1]!.events.click!();
+  expect(h.requests).toEqual([{ path: "/api/executions/2/confirm-startup", body: { terminal_id: "t1" } }]); h.view.dispose();
+});
 
 test("delivery and live agent status are separate; queue cancellation is absent", () => {
   const h = detailHarness({ setup(b) { b.executions[0].state = "sent"; b.executions[1].state = "sent"; b.executions[1].agent_status = "working"; } });
@@ -555,7 +537,7 @@ test("round inputs and follow-ups reuse the live terminal, preserve selection an
   expect(operations).toEqual(["open:2"]);
   expect(terminals.get(2)!.executionId).toBe(3);
   checkbox.checked = false; checkbox.events.change!();
-  expect(one("followup-count").textContent).toBe("未选择 agent");
+  expect(one("followup-count").textContent).toBe("已有 0 个 · 新增 0 个");
   checkbox.checked = true; checkbox.events.change!();
   input.value = "another task"; input.events.input!();
   one("followup-composer").events.submit!({ preventDefault() {} });
@@ -982,7 +964,7 @@ test("clicking the blank terminal body can recover ownership while the old scree
 });
 
 /** The real machines page and sidebar update chip, on a small DOM stand-in. */
-function machinesHarness(options: { webUi?: { installed: boolean; running: boolean }; local?: boolean; update?: any; machines?: any[]; settings?: boolean; newBroadcast?: boolean; storage?: Map<string, string>; post?: (path: string, body: any) => Promise<any>; hidden?: boolean } = {}) {
+function machinesHarness(options: { webUi?: { installed: boolean; running: boolean }; local?: boolean; update?: any; machines?: any[]; settings?: boolean; newBroadcast?: boolean; api?: (path: string) => Promise<any>; environmentOperations?: any[]; storage?: Map<string, string>; post?: (path: string, body: any) => Promise<any>; hidden?: boolean } = {}) {
   class Element {
     children: Element[] = []; parent?: Element; className = ""; text = ""; value = "";
     disabled = false; hidden = false; attrs: Record<string, any> = {}; dataset: Record<string, any> = {}; events: Record<string, Function> = {};
@@ -999,11 +981,15 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
     get textContent(): string { return this.text + this.children.map(c => c.textContent).join(""); }
     set textContent(value: string) { this.text = value; this.children = []; }
     append(...children: any[]) { for (const c of children.flat()) { if (c == null || c === false) continue; const child = c instanceof Element ? c : Object.assign(new Element("text"), { text: String(c) }); child.parent = this; this.children.push(child); } }
-    replaceChildren(...children: any[]) { this.text = ""; this.children = []; this.append(...children); }
+    replaceChildren(...children: any[]) { this.text = ""; this.children = []; this.append(...children.map(child => child instanceof Element ? child : String(child))); }
+    prepend(child: Element) { child.parent = this; this.children.unshift(child); }
     contains(child: any): boolean { return this === child || this.children.some(c => c.contains(child)); }
     setAttribute(k: string, v: any) { this.attrs[k] = v; }
     addEventListener(k: string, fn: Function) { this.events[k] = fn; }
     focus() {} select() {} scrollIntoView() {}
+    showModal() { this.attrs.open = true; }
+    close() { this.attrs.open = false; this.events.close?.(); }
+    remove() { if (this.parent) this.parent.children = this.parent.children.filter(c => c !== this); }
     get firstChild() { return this.children[0]; }
     querySelector(selector: string): Element | null {
       return this.querySelectorAll(selector)[0] ?? null;
@@ -1033,7 +1019,7 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
     { id: "m-1", label: "gpu", enabled: true, target: "u@gpu", web_link: "?machine=x&ws=w2", web_link_reason: null },
     { id: "m-2", label: "empty", enabled: true, target: "u@empty", web_link: null, web_link_reason: "机器暂无工作区，请先在 Herdr 中创建工作区" },
   ];
-  const data: any = { state: { machines, broadcasts: [] }, agents: [], webUi: options.webUi ?? { installed: false, running: false }, update: options.update ?? null };
+  const data: any = { state: { machines, broadcasts: [] }, agents: [], environmentOperations: options.environmentOperations || [], webUi: options.webUi ?? { installed: false, running: false }, update: options.update ?? null };
   const reloads: number[] = [];
   const timers: (() => void)[] = [];
   let serverInstance = "old";
@@ -1041,11 +1027,12 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
     h, data, loaded: true, DRAFT_KEY: "draft", PREFILL_KEY: "prefill", config: { local: options.local ?? true, kinds: ["claude", "codex"] }, view: null, document: { activeElement: null, body, hidden: options.hidden ?? false },
     $: (id: string) => (id === "update-box" ? updateBox : null),
     sessionStorage: { getItem: () => null, removeItem() {} },
-    localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
+    localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
+    go() {},
     autogrow: (el: Element) => el, sendButton: (attrs: any) => h("button", { class: "send", ...attrs }),
     topbar: (...children: any[]) => h("div", {}, ...children),
     machineDown: () => false, ago: () => "刚刚", toast: (t: string) => toasts.push(t), ACTIVE: [],
-    api: async (path: string) => (path.includes("health") ? { health: {}, at: 1 } : { file: null, machines: [] }),
+    api: async (path: string) => options.api ? options.api(path) : (path.includes("health") ? { health: {}, at: 1 } : { file: null, machines: [] }),
     post: async (path: string, body: any) => {
       requests.push({ path, body });
       if (options.post) return options.post(path, body);
@@ -1059,10 +1046,11 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
   };
   const run = (from: string, to: string) => pageScript.slice(pageScript.indexOf(from), pageScript.indexOf(to));
   const source = [run("function confirmButton(", "function webUiBase("), run("const WEB_UI_REPO", "/** Whether the reader has text selected"),
-    run("const compose =", "// ---- settings:"), run("function settingsView(main)", "// ---- machines:"), run("function machinesView(main)", "// ---- a broadcast: its prompt")].join("\n");
-  const scope = runInNewContext(`${source}\n({ machinesView, settingsView, newView, renderUpdate })`, globals);
+    run("function loadDraft()", "// ---- settings:"), run("function settingsView(main)", "// ---- machines:"), run("function showAgentPreparation(", "function sameHerdr("), run("function machinesView(main)", "// ---- a broadcast: its prompt")].join("\n");
+  const scope = runInNewContext(`${source}\n({ machinesView, settingsView, newView, renderUpdate, showAgentPreparation })`, globals);
   const view = options.newBroadcast ? scope.newView(main) : options.settings ? scope.settingsView(main) : scope.machinesView(main);
-  return { main, body, updateBox, data, view, requests, toasts, reloads, all, storage, document: globals.document, renderUpdate: scope.renderUpdate,
+  return { main, body, updateBox, data, view, requests, toasts, reloads, all, storage, document: globals.document,
+    openPreparation(snapshot: any, options: any = {}, machine: any = { id: "local", label: "Local test" }) { scope.showAgentPreparation(machine, snapshot, options); }, renderUpdate: scope.renderUpdate,
     advance(ms: number) { now += ms; }, notice: () => body.children.find(e => e.classList.contains("update-notice")),
     restartServer() { serverInstance = "new"; }, async pollRestart() { const next = timers.shift(); next?.(); await Bun.sleep(0); },
     text: () => main.textContent, buttons: (label: string) => all(main).filter(e => e.tag === "button" && e.textContent === label) };
@@ -1220,21 +1208,374 @@ describe("settings navigation", () => {
 });
 
 
-test("new broadcast keeps its composer above recipient choices and preserves the draft across type changes", () => {
+test("a missing work directory is distinct from an invalid Agent count", async () => {
+  const h = machinesHarness({ newBroadcast: true });
+  const field = (label: string) => h.all(h.main).find(e => e.attrs["aria-label"] === label)!;
+  await h.buttons("添加 Agent")[0]!.events.click!();
+  expect(h.toasts).toEqual(["请先填写工作目录"]);
+  field("新 Agent 工作目录").value = "/repo";
+  field("新增 Agent 数量").value = "0";
+  await h.buttons("添加 Agent")[0]!.events.click!();
+  expect(h.toasts).toEqual(["请先填写工作目录", "数量必须是 1 到 20 的整数"]);
+  expect(h.requests).toEqual([]);
+});
+
+const preparationSnapshot = () => ({ agents: [
+  { kind: "claude", name: "Claude Code", integration: "claude", cli: "/bin/claude", cliReady: true, configReady: true, integrationState: "missing", ready: false, reason: "需要安装或更新会话集成", configDir: "/tmp/claude", version: "2.1", guide: "https://example.test/claude" },
+  { kind: "codex", name: "Codex", integration: "codex", cli: null, cliReady: false, configReady: false, integrationState: "missing", ready: false, reason: "未找到 CLI", configDir: "/tmp/codex", version: null, guide: "https://example.test/codex" },
+  { kind: "pi", name: "Pi", integration: "pi", cli: "/bin/pi", cliReady: true, configReady: true, integrationState: "current", ready: true, reason: null, configDir: "/tmp/pi", version: "1.4", guide: "https://example.test/pi" },
+] });
+
+test("adding a runnable Agent without components explains installation before explicit skip", async () => {
+  const env = preparationSnapshot();
+  const h = machinesHarness({ newBroadcast: true, api: async () => env, post: async () => ({ id: 8 }) });
+  await Bun.sleep(0);
+  const field = (name: string) => h.all(h.main).find(e => e.attrs["aria-label"] === name)!;
+  expect(field("选择 Claude Code").textContent).toContain("可用 · 手动恢复会话");
+  expect(field("选择 Codex").textContent).toContain("未安装");
+  expect(h.text()).not.toContain("可以直接添加");
+  expect(h.buttons("管理全部 Agent")).toHaveLength(1);
+  field("新 Agent 工作目录").value = "/repo";
+  const adding = h.buttons("添加 Agent")[0]!.events.click!(); await Bun.sleep(0);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog).toBeDefined();
+  expect(dialog.textContent).toContain("安装会话组件");
+  expect(dialog.textContent).toContain("手动选择历史");
+  expect(dialog.textContent).not.toContain("Codex");
+  expect(h.text()).not.toContain("本机 / /repo");
+  expect(h.requests).toEqual([]);
+  h.all(dialog).find(e => e.tag === "button" && e.textContent === "暂不安装，继续添加")!.events.click!();
+  await adding;
+  expect(h.all(h.body).some(e => e.tag === "dialog")).toBe(false);
+  const prompt = field("广播内容"); prompt.value = "send without component"; prompt.events.input!();
+  await h.all(h.main).find(e => e.classList.contains("send"))!.events.click!();
+  expect(h.requests[0]!.body.new).toEqual([{ machine: "local", kind: "claude", cwd: "/repo", count: 1 }]);
+});
+
+test("dismissal cancels addition while ready and custom Agents need no installation prompt", async () => {
+  const environment = preparationSnapshot();
+  const h = machinesHarness({ newBroadcast: true, api: async () => environment });
+  await Bun.sleep(0);
+  const field = (name: string) => h.all(h.main).find(e => e.attrs["aria-label"] === name)!;
+  field("新 Agent 工作目录").value = "/repo";
+  const adding = h.buttons("添加 Agent")[0]!.events.click!(); await Bun.sleep(0);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  h.all(dialog).find(e => e.attrs["aria-label"] === "关闭准备 Agent")!.events.click!(); await adding;
+  expect(h.text()).not.toContain("本机 / /repo");
+  environment.agents[0]!.ready = true; environment.agents[0]!.integrationState = "current";
+  await h.buttons("添加 Agent")[0]!.events.click!();
+  expect(h.text()).toContain("本机 / /repo");
+  field("选择自定义命令").events.click!(); field("自定义启动命令").value = "offline-agent";
+  await h.buttons("添加 Agent")[0]!.events.click!();
+  expect(h.all(h.body).some(e => e.tag === "dialog")).toBe(false);
+  expect(h.all(h.main).filter(e => e.classList.contains("ap-pick"))).toHaveLength(2);
+  expect(h.requests).toEqual([]);
+});
+
+test("installing during addition keeps the captured configuration and requires explicit Add", async () => {
+  let installed = false;
+  const h = machinesHarness({ newBroadcast: true,
+    api: async path => path.includes("environment-operations") ? { operation: { id: "add-install", state: "done", items: [{ integration: "claude", state: "ready" }] } }
+      : { agents: preparationSnapshot().agents.map(a => a.kind === "claude" && installed ? { ...a, ready: true, integrationState: "current" } : a) },
+    post: async () => { installed = true; return { operation: { id: "add-install", state: "running", items: [{ integration: "claude", state: "installing" }] } }; } });
+  await Bun.sleep(0);
+  const field = (name: string) => h.all(h.main).find(e => e.attrs["aria-label"] === name)!;
+  field("新 Agent 工作目录").value = "/repo with spaces"; field("新增 Agent 数量").value = "2";
+  field("广播内容").value = "preserve draft"; field("广播内容").events.input!();
+  const adding = h.buttons("添加 Agent")[0]!.events.click!(); await Bun.sleep(0);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  await h.all(dialog).find(e => e.tag === "button" && e.textContent === "安装会话组件")!.events.click!(); await Bun.sleep(0);
+  expect(h.requests).toEqual([{ path: "/api/machines/local/prepare-agents", body: { integrations: ["claude"] } }]);
+  expect(h.text()).not.toContain("本机 / /repo with spaces");
+  expect(dialog.textContent).not.toContain("安装完成");
+  expect(h.all(dialog).some(e => e.classList.contains("environment-progress"))).toBe(false);
+  h.all(dialog).find(e => e.tag === "button" && e.textContent === "添加 Agent")!.events.click!(); await adding;
+  expect(h.all(h.main).filter(e => e.classList.contains("ap-pick"))).toHaveLength(1);
+  expect(h.text()).toContain("本机 / /repo with spaces");
+  expect(field("广播内容").value).toBe("preserve draft");
+  await h.all(h.main).find(e => e.classList.contains("send"))!.events.click!();
+  expect(h.requests[1]!.body.new).toEqual([{ machine: "local", kind: "claude", cwd: "/repo with spaces", count: 2 }]);
+});
+
+test("one-Agent settings stay scoped while the overall entry retains batch preparation", async () => {
+  const env = preparationSnapshot();
+  const h = machinesHarness({ newBroadcast: true, api: async () => env });
+  await Bun.sleep(0);
+  await h.buttons("设置 Claude Code")[0]!.events.click!();
+  let dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("Claude Code");
+  expect(dialog.textContent).not.toContain("Codex"); expect(dialog.textContent).not.toContain("Pi");
+  expect(h.all(dialog).find(e => e.tag === "input")!.attrs.checked).toBe(true);
+  h.all(dialog).find(e => e.attrs["aria-label"] === "关闭准备 Agent")!.events.click!();
+  await h.buttons("管理全部 Agent")[0]!.events.click!();
+  dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("Claude Code"); expect(dialog.textContent).toContain("Codex"); expect(dialog.textContent).toContain("Pi");
+  expect(dialog.textContent).toContain("自定义命令");
+  h.all(dialog).find(e => e.attrs["aria-label"] === "关闭准备 Agent")!.events.click!();
+  h.openPreparation(env, { kind: "codex" });
+  dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("请先按指引准备好程序，再重新检查");
+  expect(dialog.textContent).not.toContain("程序可用即可添加");
+  expect(h.requests).toEqual([]);
+});
+
+test("late machine scans cannot overwrite current-machine availability and errors are never called missing", async () => {
+  const pending = new Map<string, (result: any) => void>();
+  const h = machinesHarness({ newBroadcast: true, api: path => new Promise(resolve => pending.set(path, resolve)) });
+  const field = (name: string) => h.all(h.main).find(e => e.attrs["aria-label"] === name)!;
+  expect(field("选择 Claude Code").textContent).toContain("检查中");
+  expect(h.all(h.main).find(e => e.classList.contains("ap-agent-context"))!.textContent).not.toContain("null");
+  field("选择机器 gpu").events.click!();
+  pending.get("/api/machines/m-1/environment")!({ agents: [], error: "SSH unavailable" }); await Bun.sleep(0);
+  expect(field("选择 Claude Code").textContent).toContain("无法检查");
+  expect(field("选择 Claude Code").textContent).not.toContain("未安装");
+  pending.get("/api/machines/local/environment")!(preparationSnapshot()); await Bun.sleep(0);
+  expect(field("选择机器 gpu").attrs["aria-pressed"]).toBe("true");
+  expect(field("选择 Claude Code").textContent).toContain("无法检查");
+});
+
+test("custom commands explain manual operation and never require a session-component scan", async () => {
+  const h = machinesHarness({ newBroadcast: true, api: async () => { throw new Error("cannot inspect"); } });
+  const field = (name: string) => h.all(h.main).find(e => e.attrs["aria-label"] === name)!;
+  field("选择自定义命令").events.click!(); await Bun.sleep(0);
+  expect(h.text()).toContain("不提供一键安装会话组件");
+  expect(h.text()).toContain("手动选择历史");
+  expect(h.buttons("添加 Agent")[0]!.disabled).toBe(false);
+});
+
+test("all-Agent dialog selects all eligible components without selecting missing programs or ready agents", async () => {
+  const env = preparationSnapshot();
+  env.agents[1] = { ...env.agents[1]!, cli: "/bin/codex", cliReady: true, configReady: true, version: "1.0" };
+  const h = machinesHarness({ settings: true, post: async () => ({ operation: { id: "bulk", state: "done", items: [] } }) });
+  h.openPreparation(env);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  h.all(dialog).find(e => e.tag === "button" && e.textContent === "全选可配置项")!.events.click!();
+  await h.all(dialog).find(e => e.tag === "button" && e.textContent === "安装所选组件（2）")!.events.click!();
+  expect(h.requests).toEqual([{ path: "/api/machines/local/prepare-agents", body: { integrations: ["claude", "codex"] } }]);
+});
+
+test("configuring one Agent refreshes its picker status without discarding the machine, type or draft", async () => {
+  let installed = false;
+  const environment = () => ({ ...preparationSnapshot(), agents: preparationSnapshot().agents.map(a => a.kind === "claude" && installed ? { ...a, ready: true, integrationState: "current" } : a) });
+  const h = machinesHarness({ newBroadcast: true,
+    api: async path => path.includes("environment-operations") ? { operation: { id: "scoped-op", state: "done", items: [{ integration: "claude", state: "ready" }] } } : environment(),
+    post: async () => { installed = true; return { operation: { id: "scoped-op", state: "running", items: [{ integration: "claude", state: "installing" }] } }; } });
+  await Bun.sleep(0);
+  const field = (name: string) => h.all(h.main).find(e => e.attrs["aria-label"] === name)!;
+  const prompt = field("广播内容"); prompt.value = "keep my instruction"; prompt.events.input!();
+  await h.buttons("设置 Claude Code")[0]!.events.click!();
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  await h.all(dialog).find(e => e.tag === "button" && e.textContent === "安装所选组件（1）")!.events.click!(); await Bun.sleep(0);
+  expect(field("选择 Claude Code").textContent).toContain("可用 · 自动识别会话");
+  expect(field("选择 Claude Code").attrs["aria-pressed"]).toBe("true");
+  expect(field("选择机器 本机").attrs["aria-pressed"]).toBe("true");
+  expect(prompt.value).toBe("keep my instruction");
+});
+
+test("ready Agent settings disappear and return only for the selected machine needing components", async () => {
+  const env = preparationSnapshot(); env.agents[0]!.ready = true; env.agents[0]!.integrationState = "current";
+  const h = machinesHarness({ newBroadcast: true, api: async path => path.includes("/m-1/") ? preparationSnapshot() : env });
+  await Bun.sleep(0);
+  const settings = h.buttons("设置 Claude Code")[0]!;
+  expect(settings.hidden).toBe(true);
+  expect(h.buttons("管理全部 Agent")[0]!.hidden).toBe(false);
+  h.all(h.main).find(e => e.attrs["aria-label"] === "选择机器 gpu")!.events.click!(); await Bun.sleep(0);
+  expect(settings.hidden).toBe(false);
+  await settings.events.click!();
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(h.all(dialog).find(e => e.tag === "h2")!.textContent).toContain("gpu");
+  expect(dialog.textContent).toContain("u@gpu");
+  await h.all(dialog).find(e => e.tag === "button" && e.textContent === "安装所选组件（1）")!.events.click!();
+  expect(h.requests).toEqual([{ path: "/api/machines/m-1/prepare-agents", body: { integrations: ["claude"] } }]);
+});
+
+test("single and overall component dialogs prominently name their installation machine", () => {
+  for (const kind of [null, "claude"]) {
+    const h = machinesHarness({ settings: true });
+    h.openPreparation(preparationSnapshot(), { kind }, { id: "remote-2", label: "local2", target: "dev@host2" });
+    const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+    expect(h.all(dialog).find(e => e.tag === "h2")!.textContent).toContain("local2");
+    expect(dialog.textContent).toContain("dev@host2");
+    expect(dialog.textContent).toContain("每台机器独立配置");
+    expect(h.all(dialog).find(e => e.classList.contains("prep-footer-hint"))!.textContent).toContain("local2");
+  }
+});
+
+test("overall manager keeps actionable choices first and collapses ready, prerequisites and custom help", () => {
+  const h = machinesHarness({ settings: true }); h.openPreparation(preparationSnapshot());
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  const all = h.all(dialog);
+  const actionable = all.find(e => e.classList.contains("prep-installable"))!;
+  expect(actionable.textContent).toContain("可安装或更新");
+  expect(all.find(e => e.classList.contains("prep-overview"))).toBeUndefined();
+  expect(h.all(actionable).some(e => e.classList.contains("prep-agent-hint"))).toBe(false);
+  for (const name of ["prep-ready", "prep-prerequisites", "prep-custom-note"]) {
+    const group = all.find(e => e.classList.contains(name))!;
+    expect(group.tag).toBe("details"); expect(group.attrs.open).toBeUndefined();
+  }
+  expect(all.filter(e => e.tag === "input" && e.attrs.type === "checkbox")).toHaveLength(1);
+});
+
+test("a successful scoped Agent never shows a different Agent's completed failure", () => {
+  const env = preparationSnapshot(); env.agents[0]!.ready = true; env.agents[0]!.integrationState = "current";
+  const h = machinesHarness({ settings: true, environmentOperations: [{ id: "partial", machine: "local", state: "failed", items: [
+    { integration: "claude", state: "ready" }, { integration: "pi", state: "failed", reason: "other Agent failed" },
+  ] }] });
+  h.openPreparation(env, { kind: "claude" });
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("已就绪");
+  expect(dialog.textContent).not.toContain("正在处理其他 Agent");
+  expect(h.all(dialog).some(e => e.classList.contains("environment-progress"))).toBe(false);
+});
+
+test("scoped settings never expose cancellation of a different Agent's operation", async () => {
+  const h = machinesHarness({ settings: true,
+    environmentOperations: [{ id: "another-op", machine: "local", state: "running", items: [{ integration: "pi", state: "installing" }] }],
+    api: async () => ({ operation: { id: "another-op", state: "running", items: [{ integration: "pi", state: "installing" }] } }) });
+  h.openPreparation(preparationSnapshot(), { kind: "claude" });
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("其他 Agent");
+  expect(h.all(dialog).some(e => e.tag === "button" && e.textContent === "取消安装")).toBe(false);
+  expect(h.all(dialog).some(e => e.tag === "button" && e.textContent === "查看全部 Agent")).toBe(true);
+  h.all(dialog).find(e => e.attrs["aria-label"] === "关闭准备 Agent")!.events.click!();
+});
+
+test("preparation groups actionable, ready and missing agents and only submits the selected component", async () => {
+  const initial = preparationSnapshot();
+  const h = machinesHarness({ settings: true, api: async path => path.includes("environment-operations") ? { operation: { id: "op", state: "done", items: [{ integration: "claude", state: "ready" }] } } : { agents: initial.agents.map(a => a.kind === "claude" ? { ...a, ready: true, integrationState: "current" } : a) },
+    post: async () => ({ operation: { id: "op", state: "running", items: [{ integration: "claude", state: "installing" }] } }) });
+  h.openPreparation(initial);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  const all = () => h.all(dialog);
+  expect(all().find(e => e.classList.contains("prep-installable"))!.textContent).toContain("Claude Code");
+  expect(all().find(e => e.classList.contains("prep-ready"))!.textContent).toContain("Pi");
+  const missing = all().find(e => e.classList.contains("prep-prerequisites"))!;
+  expect(missing.textContent).toContain("先安装程序");
+  expect(all().filter(e => e.tag === "input" && e.attrs.type === "checkbox")).toHaveLength(1);
+  const check = all().find(e => e.tag === "input")!;
+  check.events.change!({ target: { checked: true } });
+  const install = all().find(e => e.tag === "button" && e.textContent === "安装所选组件（1）")!;
+  expect(install.disabled).toBe(false); await install.events.click!(); await Bun.sleep(0);
+  expect(h.requests).toEqual([{ path: "/api/machines/local/prepare-agents", body: { integrations: ["claude"] } }]);
+  expect(dialog.textContent).not.toContain("安装完成");
+  expect(h.all(dialog).some(e => e.classList.contains("environment-progress"))).toBe(false);
+  expect(dialog.textContent).not.toContain("cli:ready");
+});
+
+test("completed operations never appear as a second status area when reopening component settings", () => {
+  for (const kind of [null, "claude"]) {
+    const h = machinesHarness({ settings: true, environmentOperations: [{ id: "old-success", machine: "local", state: "done", items: [{ integration: "claude", state: "ready" }] }] });
+    h.openPreparation(preparationSnapshot(), { kind });
+    const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+    expect(dialog.textContent).not.toContain("安装完成");
+    expect(h.all(dialog).some(e => e.classList.contains("environment-progress"))).toBe(false);
+    expect(h.all(dialog).some(e => e.attrs["aria-label"] === "选择 Claude Code")).toBe(true);
+    expect(h.toasts).toEqual([]);
+  }
+});
+
+test("failed installation keeps the failure reason while ready Agents appear only in current status", () => {
+  const env = preparationSnapshot(); env.agents[0]!.ready = true; env.agents[0]!.integrationState = "current";
+  const h = machinesHarness({ settings: true, environmentOperations: [{ id: "failed", machine: "local", state: "failed", items: [
+    { integration: "claude", state: "ready" }, { integration: "pi", state: "failed", reason: "permission denied" },
+  ] }] });
+  h.openPreparation(env);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  const progress = h.all(dialog).find(e => e.classList.contains("environment-progress"))!;
+  expect(progress.textContent).toContain("permission denied");
+  expect(progress.textContent).not.toContain("Claude Code");
+  expect(h.all(dialog).find(e => e.classList.contains("prep-ready"))!.textContent).toContain("Claude Code");
+});
+
+test("unknown integration status cannot be selected and check failures stay readable", async () => {
+  const initial = preparationSnapshot(); initial.agents[0]!.integrationState = "unknown";
+  const h = machinesHarness({ settings: true, api: async () => { throw new Error("SSH connection interrupted"); } });
+  h.openPreparation(initial);
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(h.all(dialog).filter(e => e.tag === "input" && e.attrs.type === "checkbox")).toHaveLength(0);
+  await h.all(dialog).find(e => e.tag === "button" && e.textContent === "重新检查")!.events.click!();
+  expect(dialog.textContent).toContain("SSH connection interrupted");
+  expect(dialog.textContent).toContain("检查失败");
+});
+
+test("closing a running preparation stops observing without cancelling or reinstalling it", async () => {
+  let finish!: (result: any) => void;
+  const waiting = new Promise(resolve => { finish = resolve; });
+  const h = machinesHarness({ settings: true, local: false,
+    environmentOperations: [{ id: "active-op", machine: "local", state: "running", items: [{ integration: "claude", state: "installing" }] }],
+    api: async () => waiting });
+  h.openPreparation(preparationSnapshot());
+  const dialog = h.all(h.body).find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("关闭，后台继续");
+  expect(dialog.textContent).toContain("请在运行广播服务的电脑上安装组件");
+  expect(h.all(dialog).find(e => e.tag === "button" && e.textContent === "取消安装")!.disabled).toBe(true);
+  h.all(dialog).find(e => e.attrs["aria-label"] === "关闭准备 Agent")!.events.click!();
+  finish({ operation: { id: "active-op", state: "done", items: [] } }); await Bun.sleep(0);
+  expect(h.all(h.body).some(e => e.tag === "dialog")).toBe(false);
+  expect(h.requests).toEqual([]);
+});
+
+test("new broadcast exposes types and machines as direct buttons without select menus", () => {
   const h = machinesHarness({ newBroadcast: true });
   const column = h.all(h.main).find(e => e.classList.contains("new-column"))!;
-  expect(column.children.map(e => e.className)).toEqual(["new-hero", "composer", "recipient-picker"]);
-  const prompt = h.all(column).find(e => e.tag === "textarea")!;
-  prompt.value = "检查这个项目";
-  const type = h.all(column).find(e => e.tag === "select")!;
-  expect(type.children.map(e => e.textContent)).toEqual(["claude", "codex"]);
-  type.value = "codex"; type.events.change!(); h.view.update();
-  expect(prompt.value).toBe("检查这个项目");
-  expect(column.children[0]!.hidden).toBe(false);
-  const existing = h.all(column).find(e => e.attrs.id === "tabbtn-existing")!;
-  existing.events.click!();
-  expect(h.all(column).find(e => e.attrs.id === "tab-existing")!.hidden).toBe(false);
-  expect(h.all(column).find(e => e.attrs.id === "tab-new")!.hidden).toBe(true);
+  expect(column.children.map(e => e.className)).toEqual(["new-hero", "composer", "new-agent-picker"]);
+  const prompt = h.all(column).find(e => e.tag === "textarea")!; prompt.value = "检查这个项目";
+  expect(h.all(column).filter(e => e.tag === "select")).toEqual([]);
+  const custom = h.all(column).find(e => e.attrs["aria-label"] === "选择自定义命令")!;
+  custom.events.click!();
+  expect(h.all(column).find(e => e.classList.contains("custom-launch"))!.hidden).toBe(false);
+  expect(custom.attrs["aria-pressed"]).toBe("true");
+  h.view.update(); expect(prompt.value).toBe("检查这个项目");
+  expect(h.all(column).some(e => e.attrs.id === "tabbtn-existing")).toBe(false);
+});
+
+test("machine buttons remember typed paths and directory plus buttons add directly", async () => {
+  const h = machinesHarness({ newBroadcast: true, post: async () => ({ id: 4, executions: 1 }) });
+  h.data.agents = [{ machine: { id: "local" }, folders: [{ name: "repo", path: "/src/repo", display: "~/repo" }] }]; h.view.update();
+  const field = (label: string) => h.all(h.main).find(e => e.attrs["aria-label"] === label)!;
+  field("选择自定义命令").events.click!();
+  const path = field("新 Agent 工作目录"); path.value = "/local/draft"; await path.events.input!();
+  field("选择机器 gpu").events.click!(); expect(path.value).toBe("");
+  path.value = "~/remote/repo"; await path.events.input!();
+  field("选择机器 本机").events.click!(); expect(path.value).toBe("/local/draft");
+  expect(field("选择自定义命令").attrs["aria-pressed"]).toBe("true");
+  field("自定义启动命令").value = "offline-agent";
+  await field("在 /src/repo 添加 自定义命令").events.click!();
+  const prompt = field("广播内容"); prompt.value = "direct directory"; prompt.events.input!();
+  await h.all(h.main).find(e => e.classList.contains("send"))!.events.click!();
+  expect(h.requests[0]!.body.new).toEqual([{ machine: "local", kind: "custom", cwd: "/src/repo", count: 1, command: "offline-agent" }]);
+});
+
+test("selected Agent steppers adjust counts without losing the command or changing the input draft", async () => {
+  const h = machinesHarness({ newBroadcast: true, post: async () => ({ id: 4, executions: 2 }) });
+  const field = (label: string) => h.all(h.main).find(e => e.attrs["aria-label"] === label)!;
+  field("选择自定义命令").events.click!();
+  field("新 Agent 工作目录").value = "/repo"; field("自定义启动命令").value = "offline-agent";
+  await h.buttons("添加 Agent")[0]!.events.click!();
+  field("增加 自定义命令").events.click!();
+  expect(h.all(h.main).find(e => e.classList.contains("ap-chosen-count"))!.textContent).toBe("2 个 Agent");
+  const prompt = field("广播内容"); prompt.value = "keep this input"; prompt.events.input!();
+  h.view.update(); expect(prompt.value).toBe("keep this input");
+  await h.all(h.main).find(e => e.classList.contains("send"))!.events.click!();
+  expect(h.requests[0]!.body.new[0]).toEqual({ machine: "local", kind: "custom", cwd: "/repo", command: "offline-agent", count: 2 });
+});
+
+test("the shared picker sends custom specs without writing the startup command into browser drafts", async () => {
+  const h = machinesHarness({ newBroadcast: true, post: async () => ({ id: 3, executions: 2 }) });
+  const field = (label: string) => h.all(h.main).find(e => e.attrs["aria-label"] === label)!;
+  field("选择自定义命令").events.click!();
+  field("新 Agent 工作目录").value = "/repo";
+  field("自定义 Agent 名称").value = "Private Agent";
+  field("自定义启动命令").value = "my-agent --private=do-not-store";
+  field("新增 Agent 数量").value = "2";
+  await h.buttons("添加 Agent")[0]!.events.click!();
+  expect(field("自定义启动命令").value).toBe("");
+  const prompt = field("广播内容"); prompt.value = "new custom round"; prompt.events.input!();
+  expect([...h.storage.values()].join("\n")).not.toContain("do-not-store");
+  const send = h.all(h.main).find(e => e.classList.contains("send"))!;
+  expect(send.disabled).toBe(false); await send.events.click!();
+  expect(h.requests).toEqual([{ path: "/api/broadcasts", body: { title: "", prompt: "new custom round", new: [{ machine: "local", kind: "custom", cwd: "/repo", count: 2, command: "my-agent --private=do-not-store", label: "Private Agent" }] } }]);
+  expect(h.toasts).toEqual([]);
 });
 
 

@@ -526,27 +526,8 @@ function renderNotify() {
 
 // ---- a new broadcast: centered prompt, then recipient choices ----------------------------
 
-const compose = {
-  picked: new Set(), // "machine\0pane"
-  newPicks: new Map(), // "machine\0cwd\0kind" -> { machine, cwd, kind, count }
-  otherCwd: {},
-  moreOpen: new Set(), // machines whose every folder shows
-  get kind() { return localStorage.getItem("broadcast.newKind"); },
-  set kind(v) { localStorage.setItem("broadcast.newKind", v); },
-  freshCount() { return [...this.newPicks.values()].reduce((n, p) => n + p.count, 0); },
-  total() { return this.picked.size + this.freshCount(); },
-};
-
 function loadDraft() {
   try { return JSON.parse(localStorage.getItem(DRAFT_KEY) || "{}"); } catch { return {}; }
-}
-
-/** folders a machine lists before "更多目录" */
-const FOLDERS_SHOWN = 5;
-
-/** the type new agents get, as last chosen */
-function currentKind() {
-  return config.kinds.includes(compose.kind) ? compose.kind : config.kinds[0];
 }
 
 /** A broadcast handed over by "再发一次", taken once. */
@@ -556,503 +537,283 @@ function takePrefill() {
   try { return raw ? JSON.parse(raw) : null; } catch { return null; }
 }
 
-function newView(main) {
-  let submitting = false;
-  let disposed = false;
-  const targetIdentities = new Map();
-  const pickTarget = (machine, agent) => {
-    const k = `${machine}\0${agent.pane_id}`;
-    compose.picked.add(k);
-    targetIdentities.set(k, { machine, pane: agent.pane_id, terminal_id: agent.terminal_id, agent_kind: agent.kind,
-      session_kind: agent.session_kind, session_value: agent.session_value, ...(agent.manual ? { manual: true } : {}) });
-  };
-  compose.picked.clear();
-  compose.newPicks.clear();
-  compose.otherCwd = {};
-  const prefill = takePrefill();
-  if (prefill) {
-    for (const t of prefill.targets || []) {
-      const k = `${t.machine}\0${t.pane}`;
-      compose.picked.add(k);
-      targetIdentities.set(k, t);
-    }
-    for (const p of prefill.fresh || []) compose.newPicks.set(`${p.machine}\0${p.cwd}\0${p.kind}`, { machine: p.machine, cwd: p.cwd, kind: p.kind, count: Math.min(20, p.count) });
+/** Shared direct-choice picker. Startup commands stay in this view's memory only. */
+function newAgentPicker(onChange = () => {}) {
+  let disposed = false, locked = false, adding = false, query = 0;
+  let machineId = "local", kindId = config.kinds[0];
+  let typeShape = "", machineShape = "", folderShape = "";
+  const picks = [], directories = new Map(), typeButtons = new Map(), machineButtons = new Map();
+  const names = { claude: "Claude Code", codex: "Codex", pi: "Pi", omp: "OMP", opencode: "OpenCode", kimi: "Kimi", agy: "Antigravity", grok: "Grok", qwen: "Qwen", custom: "自定义命令" };
+  const marks = { claude: ["✳", "#bb7255"], codex: ["›_", "#557c72"], pi: ["π", "#a87746"], omp: ["o", "#8571a5"], opencode: ["oc", "#627588"], kimi: ["K", "#587bb2"], agy: ["A", "#8c72b1"], grok: ["G", "#706c65"], qwen: ["Q", "#8071b7"], custom: [">_", "#847766"] };
+  const nameOf = k => (config.capabilities || []).find(a => a.kind === k)?.name || names[k] || k;
+  const machines = () => (data.state?.machines || [{ id: "local", label: "本机", enabled: true }]).filter(m => m.enabled !== false);
+  const machineName = id => machines().find(m => m.id === id)?.label || id;
+  const types = h("div", { class: "ap-types", role: "group", "aria-label": "Agent 类型" });
+  const machineBar = h("div", { class: "ap-machines", role: "group", "aria-label": "运行机器" });
+  const folders = h("div", { class: "ap-folders", "aria-label": "常用工作目录" });
+  const cwd = h("input", { class: "ap-path-input", placeholder: "输入工作目录，例如 ~/Code/my-project", "aria-label": "新 Agent 工作目录", autocomplete: "off", spellcheck: "false" });
+  const suggestions = h("div", { class: "dir-suggestions", hidden: true });
+  const count = h("input", { class: "ap-count-input", type: "number", min: "1", max: "20", value: "1", "aria-label": "新增 Agent 数量" });
+  const decrease = h("button", { type: "button", "aria-label": "减少新增数量", onclick: () => stepCount(-1) }, "−");
+  const increase = h("button", { type: "button", "aria-label": "增加新增数量", onclick: () => stepCount(1) }, "+");
+  const label = h("input", { placeholder: "给它起个名字（可选）", "aria-label": "自定义 Agent 名称", maxlength: "120" });
+  const command = h("input", { class: "ap-command-input", placeholder: "例如 my-agent --interactive", "aria-label": "自定义启动命令", autocomplete: "off", spellcheck: "false" });
+  const custom = h("div", { class: "custom-launch", hidden: true },
+    h("div", { class: "ap-custom-fields" }, label, command),
+    h("p", { class: "ap-note" }, "自定义命令不提供一键安装会话组件。请在目标机器准备好程序，启动后手动确认，恢复时手动选择历史。启动命令不保存到历史。"));
+  const chosen = h("div", { class: "ap-chosen", hidden: true });
+  const chosenList = h("div", { class: "ap-chosen-list" });
+  const chosenCount = h("span", { class: "ap-chosen-count" });
+  chosen.append(h("div", { class: "ap-heading" }, h("span", null, "本轮新增"), chosenCount), chosenList);
+  const add = h("button", { class: "btn ap-add", type: "button", onclick: () => addSpec(cwd.value) }, "添加 Agent");
+
+  // Per-machine observations are reused across selection changes; scans never install anything.
+  const environments = new Map(), checks = new Map(), observed = new Set(), statusNodes = new Map();
+  const selectedInfo = h("div", { class: "ap-agent-context", role: "status" });
+  const environmentNote = h("span", { class: "ap-environment-note" });
+  const componentSettings = h("button", { class: "ap-environment-action", type: "button", onclick: () => { void openSettings(kindId); } }, "会话组件");
+  const inspect = h("button", { class: "ap-environment-action ap-inspect", type: "button", onclick: () => loadEnvironment(machineId, true) }, "重新检查");
+  const manage = h("button", { class: "ap-environment-action", type: "button", onclick: () => { void openSettings(); } }, "管理全部 Agent");
+  function acceptEnvironment(id, value) {
+    if (!value || !Array.isArray(value.agents) || (value.machine && value.machine !== id)) throw new Error("没有收到这台机器的环境检查结果");
+    const previous = environments.get(id);
+    if (!previous || !value.checkedAt || !previous.checkedAt || value.checkedAt >= previous.checkedAt) environments.set(id, value);
   }
-  const draft = prefill ? { title: prefill.title, prompt: prefill.prompt } : loadDraft();
-  const saveDraft = () => localStorage.setItem(DRAFT_KEY, JSON.stringify({ title: title.value, prompt: prompt.value }));
-
-  const hero = h("div", { class: "new-hero" },
-    h("h1", { class: "hero" }, h("img", { class: "hero-mark", src: "/icon.svg", alt: "" }), "要广播什么？"),
-    h("p", { class: "hero-sub" }, "一个想法，让多个 agent 同时开工。"));
-  const targets = h("div");
-  const filter = h("input", { class: "search filter", type: "search", placeholder: "筛选 agent：类型、名字、目录、标题", "aria-label": "筛选 agent", oninput: () => applyFilter() });
-  const folders = h("div");
-  // Keep the full agent catalog in one compact, keyboard-accessible control.
-  const kindPills = h("select", { class: "kind-select", "aria-label": "新 agent 的类型", onchange: () => { compose.kind = kindPills.value; renderFolders(); } });
-  const renderKinds = () => {
-    kindPills.replaceChildren(...config.kinds.map(k => h("option", { value: k }, (config.capabilities || []).find(a => a.kind === k)?.name || k)));
-    kindPills.value = currentKind();
-  };
-  renderKinds();
-
-  const chipsBox = h("div", { class: "tchips", hidden: true });
-  // the title is the prompt's first line unless one is given: out of the way until asked for
-  const title = h("input", { class: "title-input", value: draft.title || "", placeholder: "默认取 prompt 第一行", oninput: () => { saveDraft(); syncTitle(); } });
-  const titleRow = h("label", { class: "title-row", hidden: true }, h("span", null, "标题"), title);
-  const titleToggle = h("button", { class: "title-toggle", type: "button", "aria-expanded": "false", onclick: () => {
-    titleRow.hidden = !titleRow.hidden;
-    titleToggle.setAttribute("aria-expanded", String(!titleRow.hidden));
-    if (!titleRow.hidden) title.focus();
-    else prompt.focus();
-  } });
-  const syncTitle = () => {
-    const given = title.value.trim();
-    titleToggle.textContent = given ? `标题：${Array.from(given).slice(0, 16).join("")}${Array.from(given).length > 16 ? "…" : ""}` : "标题：自动";
-    titleToggle.title = given ? "改标题" : "标题默认取 prompt 第一行；点这里自己写";
-  };
-  syncTitle();
-  const prompt = autogrow(h("textarea", { rows: "2", placeholder: "写下要发给每个 agent 的 prompt", "aria-label": "Prompt",
-    // Enter sends, Shift+Enter breaks the line; not while an input method is still composing a word
-    onkeydown: (event) => { if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); submit(); } },
-    oninput: () => { saveDraft(); updateComposer(); } }));
-  prompt.value = draft.prompt || "";
-  if (prefill) saveDraft();
-  const hint = h("span", { class: "hint" });
-  const send = sendButton({ type: "button", onclick: () => submit() });
-
-  // who it goes to, one kind at a time: new agents (the usual) or agents already running.
-  // A broadcast can take both; each tab counts what is chosen in it.
-  const newPanel = h("div", { class: "tabpanel", id: "tab-new", role: "tabpanel", "aria-labelledby": "tabbtn-new" },
-    h("p", { class: "sub" }, "选择类型，再在目录右侧添加。每个 agent 都会开启新对话。"),
-    h("div", { class: "newbar" }, h("span", { class: "nb-label" }, "类型"), kindPills),
-    folders);
-  const existingPanel = h("div", { class: "tabpanel", id: "tab-existing", role: "tabpanel", "aria-labelledby": "tabbtn-existing" },
-    h("p", { class: "sub" }, "立即发送到它们当前的对话，忙碌时由 agent 自己处理消息。输入框里没发出去的草稿会和 prompt 一起发出，先确认是空的。"),
-    filter,
-    targets);
-  const customSelect = h("select", { "aria-label": "自定义 agent 所在终端" });
-  existingPanel.append(h("details", { class: "panel" }, h("summary", null, "添加自定义 agent"),
-    h("p", { class: "sub" }, "先在 Herdr 终端启动 agent 并选择会话，再选择该终端。人工确认仅在当前进程期间有效；在进程内切换会话后，请重新绑定。"), customSelect,
-    h("button", { class: "btn", type: "button", onclick: async () => {
+  function loadEnvironment(id, force = false) {
+    if (checks.has(id)) return checks.get(id);
+    if (!force && environments.has(id)) return Promise.resolve(environments.get(id));
+    const work = (async () => {
       try {
-        const selected = JSON.parse(customSelect.value);
-        await post(`/api/machines/${encodeURIComponent(selected.machine)}/manual-binding`, selected);
-        pickTarget(selected.machine, { pane_id: selected.pane, terminal_id: selected.terminal_id, kind: "custom", manual: true });
-        updateComposer(); toast("已添加人工确认的终端");
-      } catch (error) { toast(error.message, true); }
-    } }, "确认此终端并加入广播")));
-  const tabButton = (name, text) => h("button", { class: "tab", type: "button", role: "tab", id: `tabbtn-${name}`, "aria-controls": `tab-${name}`, onclick: () => showTab(name),
-    // ← → between the two, as a tab list does
-    onkeydown: (event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); showTab(name === "new" ? "existing" : "new"); $(`tabbtn-${name === "new" ? "existing" : "new"}`).focus(); } } },
-    h("span", null, text), h("span", { class: "tab-count" }));
-  const tabs = { new: tabButton("new", "新开 agent"), existing: tabButton("existing", "已有 agent") };
-  const panels = { new: newPanel, existing: existingPanel };
-  function showTab(name) {
-    for (const k of Object.keys(tabs)) {
-      const on = k === name;
-      tabs[k].setAttribute("aria-selected", String(on));
-      tabs[k].tabIndex = on ? 0 : -1;
-      panels[k].hidden = !on;
-    }
-  }
-  // sent again from a broadcast with agents already running: those are what to look at
-  showTab(prefill && (prefill.targets || []).length && !(prefill.fresh || []).length ? "existing" : "new");
-
-  main.append(
-    topbar(h("span", { class: "title" }, "新建广播")),
-    h("div", { class: "scroll new-scroll" }, h("div", { class: "column new-column" },
-      hero,
-      h("div", { class: "composer" }, chipsBox, titleRow, prompt,
-        h("div", { class: "composer-foot" }, titleToggle, hint, h("span", { class: "spacer" }), send)),
-      h("section", { class: "recipient-picker", "aria-label": "选择接收广播的 agent" },
-        h("div", { class: "tabs", role: "tablist", "aria-label": "发给谁" }, tabs.new, tabs.existing),
-        newPanel, existingPanel))));
-  prompt.focus();
-
-  const key = (machine, pane) => `${machine}\0${pane}`;
-  /** the agent rows, kept so a status change patches a row instead of rebuilding the list */
-  let targetsShape = "";
-  const statusCells = new Map();
-  /** rows to filter: each with the text it is found by, under its workspace's head */
-  let filterRows = [];
-  const matches = (row) => {
-    const words = filter.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    return words.every((w) => row.text.includes(w));
-  };
-
-  /** shows the rows that match; a workspace or machine with none left folds away */
-  function applyFilter() {
-    const active = filter.value.trim() !== "";
-    for (const row of filterRows) row.el.hidden = active && !matches(row);
-    for (const head of targets.querySelectorAll(".ws-head")) head.hidden = filterRows.every((r) => r.head !== head || r.el.hidden);
-    for (const panel of targets.querySelectorAll(".panel[data-machine]")) {
-      const left = filterRows.some((r) => r.panel === panel && !r.el.hidden);
-      panel.hidden = active && !left;
-    }
-  }
-
-  function statusOf(a) {
-    if (a.ready) return ["ok", "空闲"];
-    if (a.status === "working") return ["run", "忙"];
-    if (a.status === "blocked") return ["ask", "等待确认"];
-    return ["dim", a.status];
-  }
-
-  /**
-   * agents by the workspace each runs in, as [its label, its agents]: by the workspace itself,
-   * since two may carry the same label
-   */
-  function byWorkspace(agents) {
-    const groups = new Map();
-    for (const a of agents) {
-      const id = a.workspace_id || a.workspace;
-      if (!groups.has(id)) groups.set(id, [a.workspace, []]);
-      groups.get(id)[1].push(a);
-    }
-    return [...groups.values()];
-  }
-
-  function renderTargets() {
-    const customOptions = (data.agents || []).flatMap(g => (g.terminals || []).map(p => ({ value: JSON.stringify({ machine: g.machine.id, pane: p.pane_id, terminal_id: p.terminal_id }), label: `${g.machine.label} · ${p.pane_id} · ${p.cwd || ""}` })));
-    const customShape = JSON.stringify(customOptions);
-    if (customSelect.dataset.shape !== customShape) {
-      const previous = customSelect.value;
-      customSelect.replaceChildren(...customOptions.map(p => h("option", { value: p.value }, p.label)));
-      if (customOptions.some(p => p.value === previous)) customSelect.value = previous;
-      customSelect.dataset.shape = customShape;
-    }
-    const shape = JSON.stringify(data.agents.map((g) => [g.machine.id, g.loading, !!g.error, g.agents.map((a) => [a.pane_id, a.terminal_id, a.session_kind, a.session_value, a.workspace, a.name, a.kind, a.cwd, a.title])]));
-    if (shape === targetsShape) {
-      // same agents as before: only their states move
-      for (const group of data.agents) for (const a of group.agents) {
-        const cell = statusCells.get(key(group.machine.id, a.pane_id));
-        if (!cell || group.error) continue;
-        const [t, text] = statusOf(a);
-        cell.className = `st c-${t}`;
-        cell.textContent = text;
+        const result = await api(`/api/machines/${encodeURIComponent(id)}/environment`);
+        if (!disposed) acceptEnvironment(id, result);
+        return result;
+      } catch (error) {
+        const result = { machine: id, checkedAt: Date.now(), agents: [], error: error.message };
+        if (!disposed) environments.set(id, result);
+        return result;
+      } finally {
+        checks.delete(id); if (!disposed) refresh();
       }
-      return;
-    }
-    targetsShape = shape;
-    statusCells.clear();
-    filterRows = [];
-    targets.replaceChildren();
-    if (!loaded) targets.append(h("div", { class: "panel" }, h("div", { class: "empty-note" }, "正在读取各台机器上的 agent…")));
-    for (const group of data.agents) {
-      const id = group.machine.id;
-      const down = !!group.error;
-      const panel = h("div", { class: `panel${down ? " down" : ""}`, "data-machine": id }, h("div", { class: "panel-head" },
-        h("span", null, id === "local" ? group.machine.label : `${group.machine.label}（SSH）`),
-        down ? h("span", { class: "down-tag" }, "连不上") : h("span", { class: "meta" }, group.loading ? "读取中…" : `${group.agents.length} 个 agent`),
-        h("span", { class: "spacer" }),
-        h("button", { class: "btn quiet", type: "button", onclick: () => { for (const picked of compose.picked) if (picked.startsWith(`${id}\0`)) compose.picked.delete(picked); syncChecks(); } }, "清空")));
-      // a machine that does not answer lists nothing: what it had last may be gone
-      if (down) {
-        panel.append(downNote(id, group.error));
-        targets.append(panel);
-        continue;
-      }
-      if (!group.loading && group.agents.length === 0) panel.append(h("div", { class: "empty-note" }, "这台机器上没有正在运行的 agent"));
-      for (const [workspace, agents] of byWorkspace(group.agents)) {
-        const head = h("div", { class: "ws-head" },
-          h("span", null, workspace), h("span", null, `${agents.length} 个`), h("span", { class: "spacer" }),
-          h("button", { class: "btn quiet", type: "button", disabled: down, title: "筛选时只选筛出来的", onclick: () => {
-            const current = data.agents.find((g) => g.machine.id === id)?.agents || [];
-            const idle = agents.filter((a) => (current.find((x) => x.pane_id === a.pane_id) || a).ready)
-              .filter((a) => !filter.value.trim() || matches({ text: rowText(workspace, a) }));
-            if (idle.length === 0) return toast(`「${workspace}」里没有空闲的 agent`, true);
-            for (const a of idle) pickTarget(id, a);
-            syncChecks();
-          } }, "选中空闲的"));
-        panel.append(head);
-        for (const a of agents) {
-          const k = key(id, a.pane_id);
-          const [t, text] = down ? ["dim", "—"] : statusOf(a);
-          const cell = h("span", { class: `st c-${t}` }, text);
-          statusCells.set(k, cell);
-          const row = h("label", { class: "opt" },
-            h("input", { type: "checkbox", "data-pick": k, checked: compose.picked.has(k), disabled: down, onchange: (event) => { if (event.target.checked) pickTarget(id, a); else compose.picked.delete(k); updateComposer(); } }),
-            h("span", { class: "kind" }, a.kind),
-            h("span", { class: "where" },
-              h("span", { class: "name" }, a.name || a.pane_id),
-              a.cwd ? h("span", { class: "dir", title: a.cwd }, baseName(a.cwd)) : null,
-              a.title ? h("span", { class: "ttl" }, a.title) : null),
-            cell);
-          panel.append(row);
-          filterRows.push({ el: row, head, panel, text: rowText(workspace, a) });
-        }
-      }
-      targets.append(panel);
-    }
-    applyFilter();
+    })();
+    checks.set(id, work); syncControls();
+    return work;
   }
-
-  function rowText(workspace, a) {
-    return [a.kind, a.name, a.pane_id, a.cwd, a.title, workspace].filter(Boolean).join(" ").toLowerCase();
+  function statusOf(k) {
+    if (k === "custom") return { text: "手动启动与恢复", tone: "manual" };
+    if (checks.has(machineId)) return { text: "检查中…", tone: "checking" };
+    const snapshot = environments.get(machineId);
+    if (!snapshot) return { text: "待检查", tone: "checking" };
+    if (snapshot.error) return { text: "无法检查", tone: "unknown" };
+    const agent = snapshot.agents.find(a => a.kind === k);
+    if (!agent) return { text: "无法检查", tone: "unknown" };
+    if (!agent.cli) return { text: "未安装", tone: "missing", agent };
+    if (!agent.cliReady) return { text: "无法运行", tone: "missing", agent };
+    return { text: agent.ready ? "可用 · 自动识别会话" : "可用 · 手动恢复会话", tone: agent.ready ? "ready" : "manual", agent };
   }
-
-  function syncChecks() {
-    for (const box of targets.querySelectorAll("[data-pick]")) box.checked = compose.picked.has(box.dataset.pick);
-    updateComposer();
-  }
-
-  /**
-   * One more new agent of the current type in a folder. A folder typed in on this machine is
-   * checked first: it must be there. `known`: a folder listed, or one already checked.
-   */
-  async function addNew(machine, cwd, known = false) {
-    try {
-      const environment = await api(`/api/machines/${encodeURIComponent(machine)}/environment`);
-      if (!environment.agents.find(a => a.kind === currentKind())?.ready) {
-        showAgentPreparation({ id: machine, label: data.state.machines.find(m => m.id === machine)?.label || machine }, environment);
-        return;
-      }
-    } catch (error) { return toast(error.message, true); }
-    let path = (cwd || "").trim();
-    if (path.length > 1) path = path.replace(/\/+$/, "");
-    if (!path) return toast("先填写目录", true);
-    if (machine !== "local" && !(path.startsWith("/") || path === "~" || path.startsWith("~/"))) return toast("远程机器的目录要写绝对路径，或以 ~ 开头", true);
-    if (machine === "local" && !known) {
-      try {
-        const { target } = await api(`/api/dirs?machine=local&q=${encodeURIComponent(path)}`);
-        if (!target || !target.exists) return toast(`本机没有这个目录：${path}`, true);
-      } catch (error) { return toast(error.message, true); }
-    }
-    const kind = currentKind();
-    const k = `${machine}\0${path}\0${kind}`;
-    const pick = compose.newPicks.get(k) || { machine, cwd: path, kind, count: 0 };
-    pick.count = Math.min(20, pick.count + 1);
-    compose.newPicks.set(k, pick);
-    if (compose.otherCwd[machine] && compose.otherCwd[machine].replace(/\/+$/, "") === path) compose.otherCwd[machine] = "";
-    renderFolders();
-    updateComposer();
-  }
-
-  function changeNew(k, delta) {
-    const pick = compose.newPicks.get(k);
-    if (!pick) return;
-    pick.count = Math.min(20, pick.count + delta);
-    if (pick.count <= 0) compose.newPicks.delete(k);
-    renderFolders();
-    updateComposer();
-  }
-
-  /** a folder: how many of each type it gets, as − n +, and + for the current type */
-  function folderRow(machine, f) {
-    const kind = currentKind();
-    const picks = [...compose.newPicks.entries()].filter(([, p]) => p.machine === machine && p.cwd === f.path);
-    const steppers = picks.map(([k, p]) => h("span", { class: "stepper" },
-      h("span", { class: "sk" }, p.kind),
-      h("button", { type: "button", "aria-label": `少一个 ${p.kind}`, onclick: () => changeNew(k, -1) }, "−"),
-      h("span", { class: "sn", "aria-live": "polite" }, String(p.count)),
-      h("button", { type: "button", "aria-label": `多一个 ${p.kind}`, disabled: p.count >= 20, onclick: () => changeNew(k, 1) }, "+")));
-    const add = picks.some(([, p]) => p.kind === kind) ? null
-      : h("button", { class: "plus1", type: "button", title: `在 ${f.name} 新开一个 ${kind}`, onclick: () => addNew(machine, f.path, true) }, `+ ${kind}`);
-    return h("div", { class: "folder" },
-      h("span", { class: "name", title: f.path }, f.name),
-      h("span", { class: "path", title: f.path }, f.display, f.agents ? `　${f.agents} 个 agent 在这里` : ""),
-      h("span", { class: "picks" }, steppers, add));
-  }
-
-  /**
-   * "其他目录": a path typed by hand. On this machine, the folders under what is typed show
-   * below it as it is typed: ↑↓ to choose, Tab to complete, Enter to add.
-   */
-  function otherRow(id) {
-    const local = id === "local";
-    let items = [];
-    let active = -1;
-    let timer = null;
-    let asked = 0;
-    const list = h("div", { class: "suggest", role: "listbox", "aria-label": "目录", hidden: true });
-    const input = h("input", { value: compose.otherCwd[id] || "", "data-other": id, placeholder: local ? "其他目录，输入时会提示，例如 ~/Code/repo" : "其他目录，例如 ~/repo", "aria-label": "其他目录",
-      autocomplete: "off", spellcheck: "false", role: local ? "combobox" : null, "aria-expanded": "false" });
-    const show = () => {
-      list.hidden = items.length === 0;
-      input.setAttribute("aria-expanded", String(!list.hidden));
-      list.replaceChildren(...items.map((s, i) => h("button", { type: "button", class: `sg${i === active ? " on" : ""}`, role: "option", "aria-selected": String(i === active), tabindex: "-1",
-        // before the field loses focus to it
-        onmousedown: (event) => { event.preventDefault(); choose(i); } }, s.value)));
-    };
-    const suggest = () => {
-      if (!local) return;
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        const mine = ++asked;
-        try {
-          const { suggestions } = await api(`/api/dirs?machine=local&q=${encodeURIComponent(input.value)}`);
-          if (mine !== asked || document.activeElement !== input) return;
-          items = suggestions.slice(0, 8);
-          active = -1;
-          show();
-        } catch { /* no suggestions, typing goes on */ }
-      }, 120);
-    };
-    const choose = (i) => {
-      input.value = items[i].value;
-      compose.otherCwd[id] = input.value;
-      input.focus();
-      suggest();
-    };
-    input.addEventListener("input", () => { compose.otherCwd[id] = input.value; suggest(); });
-    input.addEventListener("focus", suggest);
-    input.addEventListener("blur", () => { clearTimeout(timer); asked += 1; items = []; show(); });
-    input.addEventListener("keydown", (event) => {
-      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && items.length) {
-        event.preventDefault();
-        // through the suggestions and back to the field itself (-1)
-        const n = items.length;
-        if (event.key === "ArrowDown") active = active + 1 >= n ? -1 : active + 1;
-        else active = active - 1 < -1 ? n - 1 : active - 1;
-        show();
-      } else if (event.key === "Tab" && !event.shiftKey && items.length) {
-        event.preventDefault();
-        choose(active >= 0 ? active : 0);
-      } else if (event.key === "Enter") {
-        event.preventDefault();
-        if (active >= 0) choose(active);
-        else addNew(id, input.value).then(() => { const again = folders.querySelector(`[data-other="${CSS.escape(id)}"]`); if (again) again.focus(); });
-      } else if (event.key === "Escape" && items.length) {
-        event.preventDefault();
-        items = [];
-        show();
-      }
+  function openSettings(kind = null, addition = false) {
+    const id = machineId;
+    return showAgentPreparation({ ...machines().find(m => m.id === id), id, label: machineName(id) }, environments.get(id) || null, {
+      kind, addition, onUpdate: snapshot => { if (!disposed) { acceptEnvironment(id, snapshot); refresh(); } },
     });
-    const kind = currentKind();
-    return h("div", { class: "folder other" },
-      h("span", { class: "name c-dim" }, "其他目录"),
-      h("div", { class: "other-field" }, input, list),
-      h("span", { class: "picks" }, h("button", { class: "plus1", type: "button", title: `在这个目录新开一个 ${kind}`, onclick: () => addNew(id, input.value) }, `+ ${kind}`)));
+  }
+  function renderEnvironment() {
+    for (const [k, node] of statusNodes) {
+      const status = statusOf(k);
+      node.textContent = status.text; node.className = `ap-type-status ${status.tone}`;
+      typeButtons.get(k)?.setAttribute("aria-description", `${machineName(machineId)} · ${status.text}`);
+    }
+    const status = statusOf(kindId), current = environments.get(machineId);
+    inspect.disabled = locked || adding || checks.has(machineId);
+    inspect.textContent = checks.has(machineId) ? "检查中…" : "重新检查";
+    manage.disabled = locked || adding;
+    environmentNote.textContent = checks.has(machineId) ? "正在检查程序…" : current?.error ? "检查失败，请重试" : "";
+    environmentNote.hidden = !environmentNote.textContent;
+    componentSettings.hidden = kindId === "custom" || !status.agent?.cliReady || status.agent.ready;
+    componentSettings.disabled = locked || adding;
+    componentSettings.textContent = `设置 ${nameOf(kindId)}`;
+    componentSettings.setAttribute("aria-label", `设置 ${nameOf(kindId)} 的会话组件`);
+    const message = status.tone === "unknown" ? `暂时无法检查 ${nameOf(kindId)}，请重新检查。`
+      : status.agent && !status.agent.cli ? `${machineName(machineId)} 尚未安装 ${nameOf(kindId)}。`
+      : status.agent && !status.agent.cliReady ? `${nameOf(kindId)} 暂时无法运行，请检查运行环境。` : "";
+    const action = status.agent && !status.agent.cliReady
+      ? h("button", { class: "ap-environment-action", type: "button", disabled: locked || adding, onclick: () => { void openSettings(kindId); } }, "查看安装步骤") : null;
+    selectedInfo.hidden = !message;
+    selectedInfo.replaceChildren(...[message ? h("p", null, message) : null, action].filter(Boolean));
+    // Known missing programs stay inspectable, but cannot be added accidentally.
+    if (kindId !== "custom" && (status.tone === "checking" || status.tone === "unknown" || !status.agent?.cliReady)) add.disabled = true;
   }
 
-  /** folders per machine: the first few, those with new agents, and the rest behind "更多" */
+  function syncControls() {
+    const disabled = locked || adding;
+    for (const input of [cwd, count, label, command, add]) input.disabled = disabled;
+    decrease.disabled = disabled || Number(count.value) <= 1;
+    increase.disabled = disabled || Number(count.value) >= 20;
+    for (const [k, button] of typeButtons) { button.disabled = disabled; button.setAttribute("aria-pressed", String(k === kindId)); button.classList.toggle("selected", k === kindId); }
+    for (const [id, button] of machineButtons) { button.disabled = disabled; button.setAttribute("aria-pressed", String(id === machineId)); button.classList.toggle("selected", id === machineId); }
+    custom.hidden = kindId !== "custom";
+    for (const button of folders.querySelectorAll("button")) button.disabled = disabled || (kindId !== "custom" && !statusOf(kindId).agent?.cliReady);
+    renderEnvironment();
+  }
+  function stepCount(delta) {
+    if (locked || adding) return;
+    count.value = String(Math.max(1, Math.min(20, (Number(count.value) || 1) + delta))); syncControls();
+  }
+  count.addEventListener("input", syncControls);
+  function hideSuggestions() { ++query; suggestions.replaceChildren(); suggestions.hidden = true; }
+  function chooseFolder(path) {
+    if (locked || adding) return;
+    cwd.value = path; directories.set(machineId, path); hideSuggestions(); renderFolders();
+  }
+  cwd.addEventListener("input", async () => {
+    directories.set(machineId, cwd.value); hideSuggestions(); renderFolders();
+    const seq = query, machine = machineId;
+    if (machine !== "local" || !cwd.value.trim()) return;
+    try {
+      const result = await api(`/api/dirs?machine=local&q=${encodeURIComponent(cwd.value)}`);
+      if (disposed || locked || seq !== query || machine !== machineId) return;
+      const items = (result.suggestions || []).slice(0, 6);
+      suggestions.replaceChildren(...items.map(dir => h("button", { class: "ap-suggestion", type: "button", onclick: () => chooseFolder(dir.value) }, dir.value)));
+      suggestions.hidden = !items.length;
+    } catch { /* A typed path remains usable without suggestions. */ }
+  });
   function renderFolders() {
-    folders.replaceChildren();
-    for (const group of data.agents) {
-      const id = group.machine.id;
-      const known = new Set(group.folders.map((f) => f.path));
-      const picked = (path) => [...compose.newPicks.values()].some((p) => p.machine === id && p.cwd === path);
-      const panel = h("div", { class: "panel" }, h("div", { class: "panel-head" }, h("span", null, id === "local" ? group.machine.label : `${group.machine.label}（SSH）`)));
-      panel.firstChild.append(h("span", { class: "spacer" }), h("button", { class: "btn quiet", type: "button", onclick: () => showAgentPreparation(group.machine) }, "准备 Agent"));
-      // nothing new starts on a machine that does not answer: no folders to offer until it does
-      if (group.error) {
-        panel.classList.add("down");
-        panel.firstChild.append(h("span", { class: "down-tag" }, "连不上"));
-        panel.append(downNote(id, null));
-        folders.append(panel);
-        continue;
+    const group = data.agents.find(g => g.machine.id === machineId);
+    const items = (group?.folders || []).slice(0, 5);
+    const shape = JSON.stringify([machineId, kindId, cwd.value, items]);
+    if (shape === folderShape) return;
+    folderShape = shape;
+    folders.replaceChildren(...items.map(f => h("div", { class: "ap-folder" },
+      h("button", { class: `ap-folder-choice${cwd.value === f.path ? " selected" : ""}`, type: "button", title: f.path, "aria-label": `选择目录 ${f.path}`, "aria-pressed": String(cwd.value === f.path), onclick: () => chooseFolder(f.path) },
+        h("span", { class: "ap-folder-icon", "aria-hidden": "true" }, "↳"), h("span", { class: "ap-folder-name" }, f.name || baseName(f.path)), h("span", { class: "ap-folder-path" }, f.display || f.path)),
+      h("button", { class: "ap-folder-add", type: "button", "aria-label": `在 ${f.path} 添加 ${nameOf(kindId)}`, title: `添加 ${nameOf(kindId)}`, onclick: () => addSpec(f.path) }, "+"))));
+    folders.hidden = !items.length; syncControls();
+  }
+  function renderChosen() {
+    chosen.hidden = !picks.length;
+    chosenCount.textContent = `${picks.reduce((n, p) => n + p.count, 0)} 个 Agent`;
+    chosenList.replaceChildren(...picks.map((p, i) => h("div", { class: "ap-pick" },
+      h("span", { class: "ap-pick-mark", "aria-hidden": "true" }, marks[p.kind]?.[0] || p.kind[0]),
+      h("div", { class: "ap-pick-info" }, h("strong", null, p.label || nameOf(p.kind)), h("span", { title: p.cwd }, `${machineName(p.machine)} / ${p.cwd}`)),
+      h("div", { class: "ap-stepper ap-pick-stepper" },
+        h("button", { type: "button", disabled: locked || p.count <= 1, "aria-label": `减少 ${p.label || nameOf(p.kind)}`, onclick: () => { if (!locked && p.count > 1) { p.count--; renderChosen(); } } }, "−"),
+        h("span", { class: "ap-pick-number" }, String(p.count)),
+        h("button", { type: "button", disabled: locked || p.count >= 20, "aria-label": `增加 ${p.label || nameOf(p.kind)}`, onclick: () => { if (!locked && p.count < 20) { p.count++; renderChosen(); } } }, "+")),
+      h("button", { class: "ap-pick-remove", type: "button", disabled: locked, "aria-label": "移除新增 Agent", onclick: () => { if (!locked) { picks.splice(i, 1); renderChosen(); } } }, "×"))));
+    onChange();
+  }
+  async function addSpec(path) {
+    if (locked || adding || disposed) return;
+    const spec = { machine: machineId, kind: kindId, cwd: path.trim(), count: Number(count.value) };
+    if (!spec.cwd) { cwd.focus(); return toast("请先填写工作目录", true); }
+    if (!Number.isInteger(spec.count) || spec.count < 1 || spec.count > 20) { count.focus(); return toast("数量必须是 1 到 20 的整数", true); }
+    if (spec.kind === "custom") {
+      if (!command.value.trim() || /[\x00\r\n]/.test(command.value)) { command.focus(); return toast("请填写单行启动命令", true); }
+      spec.command = command.value; if (label.value.trim()) spec.label = label.value.trim();
+    }
+    adding = true; syncControls();
+    try {
+      if (spec.kind !== "custom") {
+        const environment = await loadEnvironment(spec.machine, true);
+        if (disposed || locked) return;
+        if (environment.error) return toast("无法确认程序是否可用，请重新检查", true);
+        const agent = environment.agents.find(a => a.kind === spec.kind);
+        if (!agent?.cliReady) { openSettings(spec.kind); return; }
+        if (!agent.ready && !await openSettings(spec.kind, true)) return;
       }
-      const open = compose.moreOpen.has(id);
-      const shown = open ? group.folders : group.folders.filter((f, i) => i < FOLDERS_SHOWN || picked(f.path));
-      for (const f of shown) panel.append(folderRow(id, f));
-      const folded = group.folders.length - shown.length;
-      if (folded > 0 || (open && group.folders.length > FOLDERS_SHOWN)) {
-        panel.append(h("button", { class: "more-dirs", type: "button", "aria-expanded": String(open), onclick: () => {
-          if (open) compose.moreOpen.delete(id); else compose.moreOpen.add(id);
-          renderFolders();
-        } }, open ? "收起" : `更多目录（${folded}）`));
-      }
-      const typed = [...new Set([...compose.newPicks.values()].filter((p) => p.machine === id && !known.has(p.cwd)).map((p) => p.cwd))];
-      for (const cwd of typed) panel.append(folderRow(id, { name: baseName(cwd), path: cwd, display: cwd, agents: 0 }));
-      if (group.folders.length === 0 && typed.length === 0) panel.append(h("div", { class: "empty-note" }, "这台机器上还没有 agent 在运行：在下面输入要开 agent 的目录"));
-      panel.append(otherRow(id));
-      folders.append(panel);
-    }
+      if (disposed || locked) return;
+      const same = picks.find(p => p.machine === spec.machine && p.kind === spec.kind && p.cwd === spec.cwd && p.command === spec.command && p.label === spec.label);
+      if (same && same.count + spec.count > 20) return toast("同一组最多添加 20 个 Agent", true);
+      if (same) same.count += spec.count; else picks.push(spec);
+      command.value = ""; renderChosen();
+    } catch (error) { if (!disposed) toast(error.message, true); }
+    finally { adding = false; syncControls(); }
   }
-
-  /**
-   * Who the prompt goes to, as small chips after "发给", every one of them: an agent by kind and
-   * name, a new one as "+ kind · folder". × takes one off.
-   */
-  function renderChips() {
-    const chips = [];
-    for (const k of compose.picked) {
-      const [machine, pane] = k.split("\0");
-      const group = data.agents.find((g) => g.machine.id === machine);
-      const agent = group && group.agents.find((a) => a.pane_id === pane);
-      const where = machine === "local" ? "" : ` · ${group ? group.machine.label : machine}`;
-      const down = machineDown(machine);
-      chips.push(h("span", { class: `tchip${down ? " bad" : ""}`, title: down ? downReason(machine) : agent && agent.cwd ? agent.cwd : null }, `${targetIdentities.get(k)?.manual ? "人工终端" : agent ? agent.kind : "agent"} ${agent ? agent.name || pane : pane}${where}`,
-        h("button", { type: "button", "aria-label": "不发给它", onclick: () => { compose.picked.delete(k); syncChecks(); } }, "×")));
-    }
-    for (const [k, p] of compose.newPicks) {
-      const down = machineDown(p.machine);
-      const where = p.machine === "local" ? "" : ` · ${(data.agents.find((g) => g.machine.id === p.machine) || { machine: { label: p.machine } }).machine.label}`;
-      chips.push(h("span", { class: `tchip fresh${down ? " bad" : ""}`, title: down ? downReason(p.machine) : `新开 ${p.count} 个 ${p.kind}，在 ${p.cwd}` },
-        `+ ${p.kind}${p.count > 1 ? ` ×${p.count}` : ""} · ${baseName(p.cwd)}${where}`,
-        h("button", { type: "button", "aria-label": "不新开这些", onclick: () => { compose.newPicks.delete(k); renderFolders(); updateComposer(); } }, "×")));
-    }
-    chipsBox.hidden = chips.length === 0;
-    chipsBox.replaceChildren(h("span", { class: "to" }, "发给"), ...chips);
-  }
-
-  /** chosen agents and new ones on machines that do not answer: they could not be reached */
-  function stranded() {
-    return [...compose.picked].filter((k) => machineDown(k.split("\0")[0])).length
-      + [...compose.newPicks.values()].filter((p) => machineDown(p.machine)).reduce((n, p) => n + p.count, 0);
-  }
-
-  function updateComposer() {
-    renderChips();
-    // what is chosen in each tab, seen from the other
-    for (const [name, n] of [["new", compose.freshCount()], ["existing", compose.picked.size]]) {
-      const count = tabs[name].querySelector(".tab-count");
-      count.textContent = n ? String(n) : "";
-      count.hidden = !n;
-    }
-    const away = stranded();
-    const ready = compose.total() > 0 && prompt.value.trim() !== "" && away === 0;
-    send.disabled = submitting || !ready;
-    // the placeholder already asks for the prompt: the line below says only what it does not
-    const why = compose.total() === 0 ? "在下方选择接收 agent"
-      : away ? `${away} 个在连不上的机器上（红色标签）：点 × 去掉，或等机器恢复`
-      : !prompt.value.trim() ? "" : `↵ 发送给 ${compose.total()} 个 agent　⇧↵ 换行`;
-    hint.textContent = why;
-    hint.classList.toggle("c-bad", away > 0);
-    send.title = why || "先写下 prompt";
-  }
-
+  const stepTitle = (number, title) => h("span", { class: "ap-step-title" }, h("span", { class: "ap-step-number", "aria-hidden": "true" }, number), title);
+  const el = h("section", { class: "new-agent-picker", "aria-label": "新增 Agent", onkeydown: event => { if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault(); } },
+    h("div", { class: "ap-target" }, h("div", { class: "ap-heading" }, stepTitle("1", "运行机器"), h("div", { class: "ap-environment-actions" }, inspect, manage)), machineBar, environmentNote),
+    h("div", { class: "ap-heading" }, stepTitle("2", "选择 Agent"), componentSettings), types, selectedInfo, custom,
+    h("div", { class: "ap-destination" }, h("div", { class: "ap-heading" }, stepTitle("3", "设置启动位置与数量")), folders,
+      h("div", { class: "ap-launch-fields" },
+        h("div", { class: "ap-directory-field" }, h("label", { class: "ap-field-label" }, "工作目录", cwd), suggestions),
+        h("div", { class: "ap-quantity-field" }, h("span", { class: "ap-field-label" }, "数量"),
+          h("div", { class: "ap-stepper", "aria-label": "本次添加数量" }, decrease, count, increase)), add)), chosen);
   function refresh() {
-    renderTargets();
-    // not under a folder being typed: rebuilding would take the cursor away
-    if (!folders.contains(document.activeElement)) renderFolders();
-    updateComposer();
+    for (const snapshot of data.environments || []) { if (snapshot.machine) acceptEnvironment(snapshot.machine, snapshot); }
+    const catalog = [...config.kinds, "custom"];
+    if (!catalog.includes(kindId)) kindId = catalog[0];
+    const nextTypes = JSON.stringify(catalog.map(k => [k, nameOf(k)]));
+    if (nextTypes !== typeShape) {
+      typeShape = nextTypes; typeButtons.clear(); statusNodes.clear();
+      types.replaceChildren(...catalog.map(k => {
+        const status = h("span", { class: "ap-type-status" }); statusNodes.set(k, status);
+        const button = h("button", { class: "ap-type", type: "button", "aria-label": k === "custom" ? "选择自定义命令" : `选择 ${nameOf(k)}`, onclick: () => { if (locked || adding) return; kindId = k; syncControls(); renderFolders(); } },
+          h("span", { class: "ap-type-mark", style: `--agent-color:${marks[k]?.[1] || "#777"}`, "aria-hidden": "true" }, marks[k]?.[0] || k[0]), h("span", { class: "ap-type-copy" }, h("span", null, nameOf(k)), status));
+        typeButtons.set(k, button); return button;
+      }));
+    }
+    const available = machines();
+    if (!available.some(m => m.id === machineId)) { machineId = available[0]?.id || "local"; cwd.value = directories.get(machineId) || ""; hideSuggestions(); }
+    const nextMachines = JSON.stringify(available.map(m => [m.id, m.label]));
+    if (nextMachines !== machineShape) {
+      machineShape = nextMachines; machineButtons.clear();
+      machineBar.replaceChildren(...available.map(m => {
+        const button = h("button", { class: "ap-machine", type: "button", "aria-label": `选择机器 ${m.label}`, onclick: () => {
+          if (locked || adding || machineId === m.id) return;
+          directories.set(machineId, cwd.value); machineId = m.id; cwd.value = directories.get(m.id) || "";
+          hideSuggestions(); syncControls(); renderFolders(); observed.add(machineId); void loadEnvironment(machineId, true);
+        } }, h("span", { class: "ap-machine-icon", "aria-hidden": "true" }, m.id === "local" ? "▣" : "↗"), m.label);
+        machineButtons.set(m.id, button); return button;
+      }));
+    }
+    syncControls(); renderFolders();
+    if (!observed.has(machineId)) { observed.add(machineId); void loadEnvironment(machineId, true); }
   }
+  refresh();
+  return { el, specs: () => picks.map(p => ({ ...p })), count: () => picks.reduce((n, p) => n + p.count, 0), refresh,
+    clear() { picks.length = 0; renderChosen(); },
+    prefill(specs) { picks.push(...specs.filter(p => p.kind !== "custom").map(p => ({ ...p }))); renderChosen(); },
+    lock(value) { locked = value; syncControls(); renderChosen(); },
+    dispose() { disposed = true; ++query; picks.length = 0; command.value = ""; } };
+}
 
+function newView(main) {
+  let submitting = false, disposed = false;
+  const prefill = takePrefill();
+  const draft = prefill || loadDraft();
+  let picker;
+  const title = h("input", { class: "title-input", value: draft.title || "", placeholder: "标题（默认取输入第一行）", "aria-label": "广播标题", oninput: () => saveDraft() });
+  const prompt = h("textarea", { class: "prompt", rows: "4", "aria-label": "广播内容", placeholder: "要广播什么？", oninput: () => { saveDraft(); updateComposer(); }, onkeydown: e => {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); }
+  } });
+  prompt.value = draft.prompt || "";
+  const send = sendButton({ type: "button", onclick: () => submit() });
+  const hint = h("span", { class: "hint" });
+  picker = newAgentPicker(updateComposer);
+  if (prefill?.fresh) picker.prefill(prefill.fresh);
+  function saveDraft() { localStorage.setItem(DRAFT_KEY, JSON.stringify({ title: title.value, prompt: prompt.value })); }
+  function updateComposer() {
+    send.disabled = submitting || !picker?.count() || !prompt.value.trim();
+    hint.textContent = picker?.count() ? `新建 ${picker.count()} 个 Agent · Enter 发送，Shift+Enter 换行` : "添加要新建的 Agent";
+  }
   async function submit() {
-    if (submitting || disposed) return;
-    if (!prompt.value.trim()) return toast("prompt 不能为空", true);
-    if (compose.total() === 0) return toast("至少选择一个 agent，或新启动一个", true);
-    if (stranded()) return toast(`${stranded()} 个在连不上的机器上：去掉它们，或等机器恢复`, true);
-    submitting = true;
-    send.disabled = prompt.disabled = title.disabled = true;
+    if (submitting || disposed || !picker.count() || !prompt.value.trim()) return;
+    submitting = true; prompt.disabled = title.disabled = true; picker.lock(true); updateComposer();
     const submittedDraft = localStorage.getItem(DRAFT_KEY);
     try {
-      const targets = [...compose.picked].map(k => {
-        const target = targetIdentities.get(k);
-        if (!target?.terminal_id) throw new Error("所选 agent 的身份尚未确认，请重新勾选后发送");
-        return target;
-      });
-      const { id, executions } = await post("/api/broadcasts", {
-        title: title.value, prompt: prompt.value,
-        targets,
-        new: [...compose.newPicks.values()].map((p) => ({ machine: p.machine, kind: p.kind, cwd: p.cwd, count: p.count })),
-      });
+      const result = await post("/api/broadcasts", { title: title.value, prompt: prompt.value, new: picker.specs() });
       if (disposed) return;
       if (localStorage.getItem(DRAFT_KEY) === submittedDraft) localStorage.removeItem(DRAFT_KEY);
-      toast(`已发出广播，共 ${executions} 个 agent`);
-      go(`#/b/${id}`);
-    } catch (error) {
-      if (!disposed) toast(error.message, true);
-    } finally {
-      submitting = false;
-      if (!disposed) { prompt.disabled = title.disabled = false; updateComposer(); }
-    }
+      go(`#/b/${result.id}`);
+    } catch (error) { if (!disposed) toast(error.message, true); }
+    finally { submitting = false; if (!disposed) { prompt.disabled = title.disabled = false; picker.lock(false); updateComposer(); } }
   }
-
-  refresh();
-  return { update: refresh, dispose() { disposed = true; } };
+  main.append(topbar(h("span", { class: "title" }, "新建广播")), h("div", { class: "scroll new-scroll" }, h("div", { class: "column new-column" },
+    h("div", { class: "new-hero" }, h("h1", { class: "hero" }, "要广播什么？"), h("p", { class: "hero-sub" }, "一个任务，多轮协作。新建 Agent 开始第一轮。")),
+    h("div", { class: "composer" }, title, prompt, h("div", { class: "composer-foot" }, hint, send)), picker.el)));
+  updateComposer(); prompt.focus();
+  return { update() { picker.refresh(); updateComposer(); }, dispose() { disposed = true; picker.dispose(); } };
 }
+
 
 // ---- settings: one home for plugin updates and the web service ---------------------------
 
@@ -1120,65 +881,150 @@ function settingsView(main) {
 
 // ---- machines: Herdr's saved SSH machines, and adding one ---------------------------------
 
-function showAgentPreparation(machine, initial = null) {
-  const dialog = h("dialog", { class: "agent-preparation", "aria-label": `准备 Agent · ${machine.label}` });
-  const content = h("div");
-  let snapshot = initial, operation = (data.environmentOperations || []).filter(o => o.machine === machine.id).at(-1), busy = false, closed = false, timer;
+function showAgentPreparation(machine, initial = null, options = {}) {
+  const scopeKind = options.kind || null;
+  const addition = !!options.addition && !!scopeKind;
+  let acceptAddition = false, finish;
+  const result = new Promise(resolve => { finish = resolve; });
+  const scopeName = initial?.agents?.find(a => a.kind === scopeKind)?.name || (config.capabilities || []).find(a => a.kind === scopeKind)?.name || scopeKind;
+  const dialog = h("dialog", { class: `agent-preparation${addition ? " prep-addition" : !scopeKind ? " prep-manager" : ""}`, "aria-label": `${addition ? `添加 ${scopeName}` : scopeKind ? `设置 ${scopeName}` : "准备 Agent"} · ${machine.label}` });
+  const content = h("div", { class: "prep-content" });
+  const footer = h("footer", { class: "prep-footer" });
+  let snapshot = initial, operation = (data.environmentOperations || []).filter(o => o.machine === machine.id).at(-1);
+  let busy = false, closed = false, prerequisitesOpen = !!scopeKind, readyOpen = false, pollError = "", timer;
   const selected = new Set();
+  let selectionInitialized = false;
+  const visibleAgents = () => (snapshot?.agents || []).filter(a => !scopeKind || a.kind === scopeKind);
   const close = () => dialog.close();
+  const installable = a => !a.ready && a.cliReady && a.configReady && ["missing", "outdated"].includes(a.integrationState);
   const check = async () => {
     busy = true; render();
-    try { snapshot = await api(`/api/machines/${encodeURIComponent(machine.id)}/environment`); }
+    try { snapshot = await api(`/api/machines/${encodeURIComponent(machine.id)}/environment`); if (!closed) options.onUpdate?.(snapshot); }
     catch (error) { snapshot = { agents: [], error: error.message }; }
     finally { busy = false; if (!closed) render(); }
   };
   const poll = async () => {
     if (closed || !operation || operation.state !== "running") return;
-    try { operation = (await api(`/api/environment-operations/${operation.id}`)).operation; }
-    catch (error) { if (!closed) content.append(h("p", { class: "wnote bad" }, error.message)); return; }
+    clearTimeout(timer);
+    try { operation = (await api(`/api/environment-operations/${operation.id}`)).operation; pollError = ""; }
+    catch (error) { pollError = error.message; if (!closed) render(); return; }
     if (closed) return;
-    render();
-    if (operation.state === "running") timer = setTimeout(poll, 1000);
+    if (operation.state === "running") { render(); timer = setTimeout(poll, 1000); }
     else await check();
   };
   const prepare = async () => {
+    if (busy || operation?.state === "running" || !selected.size || !config.local) return;
     busy = true; render();
     try { operation = (await post(`/api/machines/${encodeURIComponent(machine.id)}/prepare-agents`, { integrations: [...selected] })).operation; }
-    catch (error) { toast(error.message, true); }
-    finally { busy = false; if (!closed) { render(); poll(); } }
+    catch (error) { if (!closed) toast(error.message, true); }
+    finally { busy = false; if (!closed) { render(); void poll(); } }
   };
-  function render() {
+  const recheck = h("button", { class: "btn prep-recheck", type: "button", onclick: check }, "重新检查");
+  function syncFooter() {
     const running = operation?.state === "running";
-    for (const a of snapshot?.agents || []) if (a.ready) selected.delete(a.integration);
-    content.replaceChildren(
-      h("h2", null, `准备 Agent · ${machine.label}`),
-      h("p", { class: "sub" }, "检测 CLI 和会话集成。所选操作只安装或更新 Herdr 集成；CLI、运行依赖和模型凭据请按官方指引准备。集成就绪后，需要 agent 启动并上报原生会话标识。"),
-      h("button", { class: "btn", type: "button", disabled: busy || running, onclick: check }, busy ? "检查中…" : "重新检查"));
-    if (snapshot?.error) content.append(h("p", { class: "wnote bad" }, snapshot.error));
-    for (const a of snapshot?.agents || []) {
-      const checkbox = h("input", { type: "checkbox", checked: selected.has(a.integration), disabled: busy || running || !a.cliReady || !a.configReady || a.ready,
-        onchange: event => { if (event.target.checked) selected.add(a.integration); else selected.delete(a.integration); render(); } });
-      content.append(h("section", { class: "environment-agent" }, h("label", null, checkbox, h("strong", null, a.name)),
-        h("span", { class: "sub" }, `${a.cliReady ? "CLI 可用" : a.cli ? "CLI 需要处理" : "CLI 缺失"} · ${a.ready ? "会话集成已准备" : a.reason || "需要检查"}`),
-        a.configDir ? h("code", null, a.configDir) : null,
-        a.version ? h("small", null, a.version) : null,
-        h("a", { href: a.guide, target: "_blank", rel: "noopener noreferrer" }, "官方安装指引 ↗")));
-    }
-    if (operation) {
-      const labels = { pending: "等待", checking: "检查中", installing: "安装中", ready: "已准备", failed: "失败", cancelled: "已取消" };
-      content.append(h("div", { class: "environment-progress", role: "status" }, operation.items.map(i => h("p", null, `${i.integration}：${labels[i.state]}${i.reason ? ` · ${i.reason}` : ""}`))));
-      if (running) content.append(h("button", { class: "btn", type: "button", disabled: !config.local, onclick: async () => {
-        try { await api(`/api/environment-operations/${operation.id}`, { method: "DELETE" }); }
-        catch (error) { toast(error.message, true); }
-      } }, "取消准备"));
-    }
-    content.append(h("div", { class: "wrow" },
-      h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, "准备所选集成"),
-      h("button", { class: "btn", type: "button", onclick: close }, running ? "关闭（后台继续）" : "完成 / 跳过")));
+    const hint = !config.local ? "请在运行广播服务的电脑上安装组件。" : running ? "关闭窗口后，安装会在后台继续。"
+      : busy ? "正在检查，请稍候…" : selected.size ? `将在 ${machine.label} 为 ${selected.size} 个 Agent 安装或更新会话组件。`
+      : visibleAgents().some(installable) ? `选择要在 ${machine.label} 安装或更新的会话组件。`
+      : scopeKind && !visibleAgents().some(a => a.cliReady) ? "请先按指引准备好程序，再重新检查。" : `${machine.label} · 会话组件按机器独立配置`;
+    if (addition) {
+      const agent = visibleAgents()[0];
+      const canContinue = !busy && !running && !snapshot?.error && !!agent?.cliReady;
+      const proceed = () => { if (canContinue) { acceptAddition = true; close(); } };
+      footer.replaceChildren(...[
+        !config.local || running || busy ? h("p", { class: "prep-footer-hint", role: "status" }, hint) : null,
+        h("div", { class: "prep-footer-actions" },
+          h("button", { class: `btn${agent?.ready ? " primary" : ""}`, type: "button", disabled: !canContinue, onclick: proceed }, agent?.ready ? "添加 Agent" : "暂不安装，继续添加"),
+          !agent?.ready ? h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, agent?.integrationState === "outdated" ? "更新会话组件" : "安装会话组件") : null),
+      ].filter(Boolean));
+    } else footer.replaceChildren(h("p", { class: "prep-footer-hint", role: "status" }, hint),
+      h("div", { class: "prep-footer-actions" },
+        h("button", { class: "btn", type: "button", onclick: close }, running ? "关闭，后台继续" : "关闭"),
+        ...(visibleAgents().some(installable) || running ? [h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, selected.size ? `安装所选组件（${selected.size}）` : "安装所选组件")] : [])));
+    recheck.disabled = busy || running;
+    recheck.textContent = busy ? "检查中…" : "重新检查";
   }
-  dialog.append(content); document.body.append(dialog);
-  dialog.addEventListener("close", () => { closed = true; clearTimeout(timer); dialog.remove(); });
-  render(); dialog.showModal(); if (!initial) check(); if (operation?.state === "running") poll();
+  function agentRow(a, mode) {
+    const pending = mode === "installable";
+    const state = pending ? a.integrationState === "outdated" ? "组件待更新" : "组件待安装"
+      : a.ready ? "已就绪" : !a.cli ? "未安装程序" : !a.cliReady ? "程序需处理" : !a.configReady ? "需要初始化" : "需要检查";
+    const hint = pending ? a.integrationState === "outdated" ? "程序可用，可按需更新会话识别组件。" : "程序可用。配置会话识别可帮助找回原对话；未配置也能发送广播。"
+      : a.ready ? "程序可用，会话识别已配置，无需重复设置。"
+      : !a.cli ? `先在这台机器安装 ${a.name}，然后重新检查。`
+      : !a.cliReady ? (a.reason || "程序无法运行，请检查安装和运行环境。").replace(/\bCLI\b/g, "程序")
+      : !a.configReady ? `先在这台机器启动一次 ${a.name}，完成初始化后重新检查。`
+      : "无法确认会话组件状态，请重新检查 Herdr 版本与配置。";
+    const name = h("strong", null, a.name);
+    const identity = pending ? h("label", { class: "prep-agent-choice" },
+      h("input", { type: "checkbox", "aria-label": `选择 ${a.name}`, checked: selected.has(a.integration), disabled: busy || operation?.state === "running" || !config.local,
+        onchange: event => { if (event.target.checked) selected.add(a.integration); else selected.delete(a.integration); syncFooter(); } }), name) : name;
+    return h("article", { class: `prep-agent ${pending ? "actionable" : a.ready ? "ready" : "prerequisite"}` },
+      h("div", { class: "prep-agent-top" }, identity, h("span", { class: `prep-badge ${pending ? "pending" : a.ready ? "ready" : "muted"}` }, state)),
+      scopeKind || mode === "prerequisite" ? h("p", { class: "prep-agent-hint" }, hint) : null,
+      mode === "prerequisite" ? h("a", { class: "prep-guide-link", href: a.guide, target: "_blank", rel: "noopener noreferrer" }, !a.cli ? `安装 ${a.name} ↗` : "查看设置指引 ↗") : null,
+      a.configDir || a.version ? h("details", { class: "prep-agent-details" }, h("summary", { "aria-label": `查看 ${a.name} 的版本与配置` }, !scopeKind && a.version ? `${a.version} · 版本与配置` : "版本与配置"),
+        a.version ? h("div", null, h("span", null, "程序版本"), h("code", null, a.version)) : null,
+        a.configDir ? h("div", null, h("span", null, "配置目录"), h("code", null, a.configDir)) : null) : null);
+  }
+  function render() {
+    const agents = visibleAgents();
+    const actionable = agents.filter(installable), ready = agents.filter(a => a.ready), prerequisites = agents.filter(a => !a.ready && !installable(a));
+    if (scopeKind && snapshot && !selectionInitialized) {
+      selectionInitialized = true; for (const a of actionable) selected.add(a.integration);
+    }
+    for (const name of selected) if (!actionable.some(a => a.integration === name)) selected.delete(name);
+    content.replaceChildren();
+    if (snapshot?.error) content.append(h("div", { class: "prep-error", role: "alert" }, h("strong", null, "检查失败"), h("p", null, snapshot.error), h("p", null, "请确认机器连接正常，再点击右上角重新检查。")));
+    else if (!snapshot) content.append(h("p", { class: "prep-loading", role: "status" }, "正在检查这台机器上的 Agent…"));
+    else {
+      if (addition) content.append(h("div", { class: "prep-add-benefits" },
+        h("p", null, ready.length ? "会话组件已就绪，可以添加 Agent。" : "不安装也能添加；之后恢复原对话时，需要手动选择历史。"),
+        h("p", { class: "prep-add-alternative" }, "仅安装 Herdr 会话组件，不安装 Agent 程序、依赖或模型账号。")));
+      if (actionable.length && !addition) content.append(h("section", { class: "prep-installable" }, h("div", { class: "prep-section-heading" }, h("h3", null, scopeKind ? "配置会话识别" : `可安装或更新 · ${actionable.length}`),
+        !scopeKind ? h("button", { class: "ap-environment-action", type: "button", disabled: busy || operation?.state === "running" || !config.local, onclick: () => {
+          const all = actionable.every(a => selected.has(a.integration));
+          for (const a of actionable) { if (all) selected.delete(a.integration); else selected.add(a.integration); } render();
+        } }, actionable.every(a => selected.has(a.integration)) ? "取消全选" : "全选可配置项") : null), h("div", { class: "prep-list" }, actionable.map(a => agentRow(a, "installable")))));
+      if (ready.length && !addition) content.append(scopeKind
+        ? h("section", { class: "prep-ready" }, h("div", { class: "prep-section-heading" }, h("h3", null, "已就绪"), h("span", null, "无需操作")), ready.map(a => agentRow(a, "ready")))
+        : h("details", { class: "prep-ready prep-group", open: readyOpen, ontoggle: event => { readyOpen = event.target.open; } },
+          h("summary", null, h("strong", null, `已就绪 · ${ready.length}`), h("span", null, "无需重复安装")), h("div", { class: "prep-list" }, ready.map(a => agentRow(a, "ready")))));
+      if (prerequisites.length) content.append(h("details", { class: "prep-prerequisites prep-group", open: prerequisitesOpen, ontoggle: event => { prerequisitesOpen = event.target.open; } },
+        h("summary", null, h("strong", null, `需先处理 · ${prerequisites.length}`), h("span", null, "先安装程序或完成初始化")), h("div", { class: "prep-list" }, prerequisites.map(a => agentRow(a, "prerequisite")))));
+      if (!agents.length) content.append(h("p", { class: "prep-loading" }, "暂无检查结果，请重新检查。"));
+    }
+    if (addition && (snapshot?.error || agents.some(a => !a.ready && !installable(a)))) content.append(recheck);
+    if (!scopeKind) content.append(h("details", { class: "prep-custom-note" }, h("summary", null, "自定义命令如何配置？"),
+      h("p", null, "自定义命令不提供一键安装会话组件；请自行准备程序，启动后手动确认，恢复时手动选择历史。")));
+    const items = (operation?.items || []).filter(i => (!scopeKind || agents.some(a => a.integration === i.integration))
+      && (operation.state === "running" || i.state !== "ready"));
+    if (operation && operation.state !== "done" && (operation.state === "running" || items.length)) {
+      const labels = { pending: "等待安装", checking: "检查中", installing: "安装中", ready: "已完成", failed: "安装失败", cancelled: "已取消" };
+      const title = { running: "正在安装会话组件", failed: "部分组件安装失败", cancelled: "安装已取消", interrupted: "上次安装中断，请重新检查" }[operation.state] || "安装进度";
+      content.prepend(h("section", { class: "environment-progress", role: "status" },
+        h("strong", null, items.length ? `${machine.label} · ${title}` : "这台机器正在处理其他 Agent，请在全部管理中查看进度。"),
+        items.map(i => h("div", { class: "prep-progress-item" }, h("span", null, agents.find(a => a.integration === i.integration)?.name || i.integration), h("span", null, labels[i.state] || i.state), i.reason ? h("p", null, i.reason) : null)),
+        pollError ? h("p", { class: "prep-error", role: "alert" }, `暂时无法获取进度：${pollError}`, h("button", { class: "btn", type: "button", onclick: poll }, "重试获取进度")) : null,
+        operation.state === "running" && (!scopeKind || items.length) ? h("button", { class: "btn", type: "button", disabled: busy || !config.local, onclick: async () => {
+          busy = true; render();
+          try { await api(`/api/environment-operations/${operation.id}`, { method: "DELETE" }); }
+          catch (error) { if (!closed) toast(error.message, true); }
+          finally { busy = false; if (!closed) render(); }
+        } }, "取消安装") : null));
+    }
+    syncFooter();
+  }
+  dialog.append(h("header", { class: "prep-header" },
+    h("div", { class: "prep-title-row" }, h("div", { class: "prep-title" }, h("span", { class: "prep-machine" }, "会话组件 · 按机器配置"),
+      h("h2", null, scopeKind ? `${machine.label} · ${scopeName}` : `${machine.label} 的 Agent 组件`),
+      machine.target ? h("code", { class: "prep-machine-address" }, machine.target) : null),
+      h("button", { class: "prep-close", type: "button", "aria-label": "关闭准备 Agent", onclick: close }, "×")),
+    h("div", { class: "prep-toolbar" }, h("p", { class: "prep-intro" }, addition ? `组件将安装在 ${machine.label}，用于自动识别会话、找回原对话。`
+      : "每台机器独立配置，组件用于自动识别并找回原对话。"), !addition ? recheck : null),
+    scopeKind && !addition ? h("button", { class: "ap-environment-action prep-show-all", type: "button", onclick: () => { close(); showAgentPreparation(machine, snapshot, { onUpdate: options.onUpdate }); } }, "查看全部 Agent") : null), content, footer);
+  document.body.append(dialog);
+  dialog.addEventListener("close", () => { closed = true; clearTimeout(timer); dialog.remove(); finish(acceptAddition); });
+  render(); dialog.showModal(); if (!initial) void check(); if (operation?.state === "running") void poll();
+  return result;
 }
 
 /** Two Herdr versions alike (`herdr 0.9.5`): what `herdr machine add` asks of a server. */
@@ -1885,6 +1731,7 @@ function connectionPresentation(e, ready, recovery = null, handedOff = false) {
     failed: { kind: "failed", text: "未能恢复对话", action: "continue", button: "重试" },
     closed: { kind: "closed", text: "对话已关闭", action: "continue", button: "继续对话" },
   };
+  if (e.custom_startup_pending) return { kind: "confirm", text: "等待确认就绪，尚未发送本轮输入", action: "custom-startup", button: "已进入新对话，发送本轮输入" };
   if (e.requires_action) return states.settings;
   if (recovery === "unavailable" || e.restore_unavailable) return states.unavailable;
   if (recovery === "failed") return states.failed;
@@ -2017,22 +1864,16 @@ function broadcastView(main, id, focusExec) {
 
   /** The same prompt to the same agents, as a new broadcast to look over before it goes. */
   function rebroadcast(b) {
-    const targets = new Map();
     const fresh = new Map();
     let missing = 0;
     for (const e of b.executions) {
-      const group = data.agents.find((g) => g.machine.id === e.machine_id);
-      if (e.pane_id && group && group.agents.some((a) => a.pane_id === e.pane_id && a.terminal_id === e.terminal_id)) targets.set(`${e.machine_id}\0${e.pane_id}`, {
-        machine: e.machine_id, pane: e.pane_id, terminal_id: e.terminal_id, agent_kind: e.agent_kind, session_kind: e.session_kind, session_value: e.session_value });
-      else if (e.target_kind === "new" && e.cwd && group) {
-        const k = `${e.machine_id}\0${e.cwd}\0${e.agent_kind}`;
-        const pick = fresh.get(k) || { machine: e.machine_id, cwd: e.cwd, kind: e.agent_kind, count: 0 };
-        pick.count += 1;
-        fresh.set(k, pick);
-      } else missing += 1;
+      if (!e.cwd || !e.agent_kind || e.agent_kind === "custom") { missing++; continue; }
+      const k = JSON.stringify([e.machine_id, e.cwd, e.agent_kind]);
+      const p = fresh.get(k) || { machine: e.machine_id, cwd: e.cwd, kind: e.agent_kind, count: 0 };
+      p.count++; fresh.set(k, p);
     }
-    sessionStorage.setItem(PREFILL_KEY, JSON.stringify({ title: b.title, prompt: b.prompt, targets: [...targets.values()], fresh: [...fresh.values()] }));
-    if (missing) toast(`${missing} 个 agent 已经不在了，没有选上`);
+    sessionStorage.setItem(PREFILL_KEY, JSON.stringify({ title: b.title, prompt: b.prompt, fresh: [...fresh.values()] }));
+    if (missing) toast(`${missing} 个参与者无法转为新建配置，请重新选择并填写命令`);
     go("#/new");
   }
 
@@ -2214,13 +2055,18 @@ function broadcastView(main, id, focusExec) {
   draftKey();
   const followupSend = h("button", { class: "btn primary", type: "submit", disabled: true }, "发送");
   const followupClear = h("button", { class: "btn quiet followup-clear", type: "button", disabled: true, onclick: () => setPicked([]) }, "清空");
+  let newPicker;
+  const newPickerHost = h("div");
+  const addAgents = h("details", { class: "followup-add" }, h("summary", null, "新增 Agent"), newPickerHost);
   const followupBox = h("form", { class: "followup-composer", onsubmit: (event) => { event.preventDefault(); void sendFollowup(); } },
     h("div", { class: "followup-heading" },
       h("div", { class: "followup-heading-info" }, h("strong", null, "继续广播"), followupCount),
       h("div", { class: "followup-controls" },
         h("button", { class: "btn quiet", type: "button", "aria-label": "全选 agent", onclick: () => setPicked([...panels.keys()]) }, "全选"), followupClear)),
-    followupTargets, followupInput,
+    followupTargets, followupInput, addAgents,
     h("div", { class: "followup-footer" }, h("span", { class: "followup-shortcut" }, "⌘ / Ctrl + Enter 发送"), followupSend), followupResult);
+  newPicker = newAgentPicker(syncComposer);
+  newPickerHost.append(newPicker.el);
   function setPicked(ids) {
     if (followupSending) return;
     picked.clear();
@@ -2230,13 +2076,14 @@ function broadcastView(main, id, focusExec) {
   function syncComposer() {
     const selected = [...picked].map(id => panels.get(id)?.current).filter(Boolean);
     const blocked = selected.filter(e => !e.can_follow_up);
-    followupSend.disabled = followupSending || !picked.size || !followupInput.value.trim() || blocked.length > 0;
-    followupSend.textContent = followupSending ? "正在发送…" : picked.size ? `发送给 ${picked.size} 个 agent` : "发送";
+    followupSend.disabled = followupSending || (!picked.size && !newPicker?.count()) || !followupInput.value.trim() || blocked.length > 0;
+    const total = picked.size + (newPicker?.count() || 0);
+    followupSend.textContent = followupSending ? "正在发送…" : total ? `发送给 ${total} 个 agent` : "发送";
     followupClear.disabled = followupSending || !picked.size;
     followupInput.placeholder = picked.size ? "输入下一轮任务…" : "选择下方 agent，输入下一轮任务…";
     followupInput.disabled = followupSending;
     for (const { button } of roundButtons.values()) button.disabled = followupSending;
-    followupCount.textContent = picked.size ? `已选 ${picked.size} 个 agent` : "未选择 agent";
+    followupCount.textContent = `已有 ${picked.size} 个 · 新增 ${newPicker?.count() || 0} 个`;
     const shape = JSON.stringify(selected.map(e => [e.id, e.machine_label, e.agent_name, e.agent_kind]));
     if (shape !== selectionShape) {
       selectionShape = shape;
@@ -2254,19 +2101,21 @@ function broadcastView(main, id, focusExec) {
     syncComposer();
   }
   async function sendFollowup() {
-    if (followupSending || !picked.size || !followupInput.value.trim()) return;
+    if (followupSending || (!picked.size && !newPicker?.count()) || !followupInput.value.trim()) return;
     if ([...picked].some(id => !panels.get(id)?.current.can_follow_up)) { syncPicked(); return; }
     const targets = [...picked].map(execution_id => ({ execution_id, terminal_id: panels.get(execution_id)?.current.terminal_id }));
     const prompt = followupInput.value;
     followupSending = true;
+    newPicker.lock(true);
     followupResult.hidden = true;
     syncPicked();
     try {
-      const result = await post(`/api/broadcasts/${broadcastId()}/follow-up`, { prompt, targets });
+      const result = await post(`/api/broadcasts/${broadcastId()}/follow-up`, { prompt, targets, ...(newPicker.count() ? { new: newPicker.specs() } : {}) });
       if (disposed) return;
       const key = draftKey();
       if (key && sessionStorage.getItem(key) === prompt) sessionStorage.removeItem(key);
       followupInput.value = "";
+      newPicker.clear();
       followupResult.className = "followup-result";
       selectedRoundId = result.round_id;
       followupResult.textContent = `第 ${result.round_number} 轮已提交给 ${result.executions} 个 agent，记录保留在本页。`;
@@ -2280,7 +2129,7 @@ function broadcastView(main, id, focusExec) {
       followupInput.focus();
     } catch (error) {
       if (!disposed) { followupResult.className = "followup-result bad"; followupResult.textContent = "尚未确认提交结果，请查看任务记录。"; followupResult.hidden = false; }
-    } finally { followupSending = false; if (!disposed) syncPicked(); }
+    } finally { followupSending = false; if (!disposed) { newPicker.lock(false); syncPicked(); } }
   }
 
   function sendTerminalInput(execId, text) {
@@ -2410,6 +2259,13 @@ function broadcastView(main, id, focusExec) {
   async function connectionActionFor(panel) {
     if (panel.busy) return;
     const display = connectionPresentation(panel.current, panel.live, panel.recovery);
+    if (display.action === "custom-startup") {
+      panel.busy = true;
+      try { await post(`/api/executions/${panel.current.id}/confirm-startup`, { terminal_id: panel.current.terminal_id }); await refreshConversation(); }
+      catch (error) { toast(error.message, true); }
+      finally { panel.busy = false; if (currentPanel(panel)) updateTerminalDisplay(panel); }
+      return;
+    }
     if (display.action === "settings") {
       sessionStorage.setItem("broadcast.connection-settings", JSON.stringify({ machine: panel.current.machine_label || panel.current.machine_id,
         reason: panel.current.resume_reason || "请检查这台设备的连接配置。" }));
@@ -2571,6 +2427,7 @@ function broadcastView(main, id, focusExec) {
   }
 
   function update() {
+    newPicker.refresh();
     const broadcast = findBroadcast(broadcastId());
     if (!broadcast) {
       for (const panel of panels.values()) {
@@ -2687,6 +2544,7 @@ function broadcastView(main, id, focusExec) {
   for (const type of helpDismissEvents) document.addEventListener(type, dismissWebUiHelp, true);
   update();
   return { update, escape, dispose() {
+    newPicker.dispose();
     disposed = true;
     for (const type of helpDismissEvents) document.removeEventListener(type, dismissWebUiHelp, true);
     for (const panel of panels.values()) disposePanel(panel);

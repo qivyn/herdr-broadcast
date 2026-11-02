@@ -69,7 +69,7 @@ if (process.env.FAKE_HERDR_LOG) appendFileSync(process.env.FAKE_HERDR_LOG, `${ma
 const command = `${args[0]} ${args[1]}`;
 
 /** Reads must not write: concurrent calls would put back a stale copy over another's change. */
-const MUTATING = new Set(["agent prompt", "agent start", "agent rename", "workspace create", "tab create", "pane send-text", "pane send-keys", "pane close", "machine rename", "machine enable", "machine disable", "machine remove"]);
+const MUTATING = new Set(["agent prompt", "agent start", "agent rename", "workspace create", "tab create", "pane run", "pane send-text", "pane send-keys", "pane close", "machine rename", "machine enable", "machine disable", "machine remove"]);
 const lockDir = `${file}.lock`;
 let locked = false;
 /** Mutations (and any call that may consume an injected failure) hold a lock from read to write. */
@@ -266,6 +266,11 @@ switch (command) {
     server.prompts.push({ pane_id: agent.pane_id, text: args[3]! });
     if (server.promptDelayMs) await Bun.sleep(server.promptDelayMs);
     ok({ type: "agent_prompted", ...(server.promptReply === null ? {} : { agent: { ...agent, focused: false, ...server.promptReply } }) });
+  }
+  case "pane run": {
+    const pane = server.panes.find(p => p.pane_id === args[2]) ?? fail("pane_not_found");
+    (server.processes ??= {})[pane.pane_id] = [{ pid: process.ppid, name: "custom-fixture" }];
+    ok({ type: "ok" });
   }
   case "pane send-text": {
     const pane = server.panes.find((p) => p.pane_id === args[2]) ?? fail("pane_not_found");

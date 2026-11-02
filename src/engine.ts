@@ -8,10 +8,10 @@ import { conversationTarget, resumeIdentityIssue, unsentNewExecution } from "./c
 export { unsentNewExecution } from "./conversation-target.ts";
 import {
   agentFocus, agentGet, agentList, agentPrompt, agentStart, agentWaitReady, HerdrError, LOCAL, machineList, paneRead, paneSendKeys, paneSendText, tabCreate, tabFocus, tabRename,
-  workspaceCreate, workspaceFocus, workspaceList, paneList, type Created, type MachineProfile,
+  workspaceCreate, workspaceFocus, workspaceList, paneList, herdrResult, type Created, type MachineProfile,
 } from "./herdr.ts";
 import type { AgentInfo, PaneInfo, WorkspaceInfo } from "./herdr-types.ts";
-import { refreshManual } from "./manual-session.ts";
+import { confirmManual, refreshManual, terminalProcesses, sameProcess, type ProcessIdentity } from "./manual-session.ts";
 import { continuationKey } from "./conversation-target.ts";
 import { agentLaunchArgs, codexInputBlock } from "./agent-launch.ts";
 import { acquireIdentity } from "./identity-acquisition.ts";
@@ -184,6 +184,9 @@ export class Engine {
   private identityWaits = new Map<number, AbortController>();
   identityPending(id: number): boolean { return this.identityWaits.has(id); }
   private startupWaits = new Map<number, AbortController>();
+  private customWaits = new Map<number, { wait: AbortController; processes: ProcessIdentity[] | null; confirmed: boolean; confirming?: Promise<void> }>();
+  private customConfirmed = new Map<number, string>();
+  customStartupPending(id: number): boolean { return this.customWaits.has(id); }
   /** reads, sends and starts in flight, so a process can wait for them before it lets go of its database */
   private pending = new Set<Promise<unknown>>();
   /** set by stop(): a read that answers afterwards moves nothing along */
@@ -238,7 +241,7 @@ export class Engine {
   }
 
   /** Called synchronously after creating this request's history, never from polling/recovery. */
-  submit(roundId: number): void {
+  submit(roundId: number, commands: ReadonlyMap<number, string> = new Map()): void {
     this.assertAccepting();
     const round = this.store.getRound(roundId);
     if (!round) throw new Error("广播轮次不存在");
@@ -249,7 +252,7 @@ export class Engine {
       // The legacy sending trigger is conservative. No input has been attempted yet.
       this.store.update(e.id, { input_attempted: 0 });
       this.busy.add(e.id);
-      this.track(this.deliver(e, state === "starting"));
+      this.track(this.deliver(e, state === "starting", commands.get(e.id)));
     }
     this.changed();
   }
@@ -340,11 +343,14 @@ export class Engine {
     }
   }
 
-  private async deliver(original: Execution, create: boolean): Promise<void> {
+  private async deliver(original: Execution, create: boolean, command?: string): Promise<void> {
     let attempted = false;
     try {
       if (!this.machine(original.machine_id)?.enabled) throw new Error("机器不可用，请恢复连接后手动重试");
-      if (create) await this.startAgent(original);
+      if (create) {
+        if (original.agent_kind === "custom") await this.startCustom(original, command);
+        else await this.startAgent(original);
+      }
       const e = this.store.execution(original.id)!;
       const round = this.store.getRound(e.round_id);
       if (!e.pane_id || !round) throw new Error("广播目标或轮次不存在");
@@ -422,6 +428,80 @@ export class Engine {
       this.busy.delete(original.id);
       this.changed();
       if (!this.stopped) this.track(this.refresh(original.machine_id));
+    }
+  }
+
+  /** Confirms only this process's accepted custom launch; never revives a saved command. */
+  async confirmCustomStartup(id: number, terminal: unknown): Promise<void> {
+    const e = this.store.execution(id);
+    if (!e || typeof terminal !== "string" || !terminal || terminal !== e.terminal_id) throw new Error("所选终端已变化");
+    if (this.customConfirmed.get(id) === terminal) return;
+    const pending = this.customWaits.get(id);
+    if (!pending || pending.wait.signal.aborted || !this.dispatching) throw new Error("本次启动已结束，不能补发输入；请检查终端后明确继续广播");
+    if (pending.confirming) return pending.confirming;
+    pending.confirming = (async () => {
+      if (!pending.processes) throw new Error("尚未检测到持续运行的 Agent，请先在终端完成启动");
+      const current = await terminalProcesses(e.machine_id, e.pane_id!, terminal);
+      if (!sameProcess(pending.processes, current)) throw new Error("启动期间进程已变化，消息未发送");
+      const pane = (await paneList(e.machine_id)).find(p => p.pane_id === e.pane_id && p.terminal_id === terminal);
+      if (!pane) throw new Error("启动期间终端已变化");
+      const binding = await confirmManual(this.store, e.machine_id, pane, `execution:${id}`, e.workspace_label ?? "");
+      if (!sameProcess(pending.processes, binding.manual_process!.processes)) throw new Error("确认期间进程已变化，消息未发送");
+      pending.wait.signal.throwIfAborted();
+      if (!this.dispatching || this.customWaits.get(id) !== pending) throw new Error("本次启动已结束，未发送输入");
+      pending.confirmed = true;
+      this.customConfirmed.set(id, terminal);
+    })().finally(() => { pending.confirming = undefined; });
+    return pending.confirming;
+  }
+
+  private async startCustom(e: Execution, command?: string): Promise<void> {
+    if (!command) throw new Error("自定义启动命令不保存在历史中；请重新填写命令并明确新增 Agent");
+    const wait = new AbortController();
+    const pending = { wait, processes: null as ProcessIdentity[] | null, confirmed: false };
+    // Register before workspace creation: drain/cancel must also end an in-flight creation.
+    this.startupWaits.set(e.id, wait);
+    try {
+      const broadcast = this.store.getBroadcast(e.broadcast_id)!;
+      const created = await this.placeFor(e, broadcast.title, resolveCwd(e.machine_id, e.cwd!));
+      const pane = created.root_pane;
+      if (!pane?.pane_id || !pane.terminal_id) throw new Error("Herdr 没有返回新终端");
+      this.store.update(e.id, { pane_id: pane.pane_id, terminal_id: pane.terminal_id,
+        workspace_id: created.workspace?.workspace_id ?? pane.workspace_id, workspace_label: created.workspace?.label ?? null,
+        tab_id: created.tab?.tab_id ?? pane.tab_id, note: "正在启动自定义 Agent…" });
+      wait.signal.throwIfAborted();
+      this.customWaits.set(e.id, pending);
+      // A fresh pane may precede its shell. Wait for the shell, then execute exactly once.
+      const shellDeadline = Date.now() + 10_000;
+      while (true) {
+        wait.signal.throwIfAborted();
+        const info = await herdrResult<{ process_info: { shell_pid: number | null } }>(["pane", "process-info", "--pane", pane.pane_id], { machine: e.machine_id });
+        if (info.process_info?.shell_pid) break;
+        if (Date.now() >= shellDeadline) throw new Error("新终端的 shell 未就绪，启动命令未执行");
+        await sleepUnless(100, wait.signal);
+      }
+      wait.signal.throwIfAborted();
+      if (!(await paneList(e.machine_id)).some(p => p.pane_id === pane.pane_id && p.terminal_id === pane.terminal_id)) throw new Error("新终端已变化，启动命令未执行");
+      wait.signal.throwIfAborted();
+      try { await herdrResult(["pane", "run", pane.pane_id, command], { machine: e.machine_id }); }
+      catch { throw new Error("自定义命令启动结果无法确认，请检查终端；不会自动重试"); }
+      const deadline = Date.now() + this.timing.startupConfirmMs;
+      this.store.update(e.id, { note: "等待确认就绪：请进入新对话后点击发送本轮输入；最多等待 5 分钟，可取消。" });
+      this.changed();
+      while (!pending.confirmed) {
+        wait.signal.throwIfAborted();
+        if (Date.now() >= deadline) throw new Error("确认就绪超时，消息未发送；不会自动补发");
+        if (!(await paneList(e.machine_id)).some(p => p.pane_id === pane.pane_id && p.terminal_id === pane.terminal_id)) throw new Error("启动期间终端已关闭或替换，消息未发送");
+        let processes: ProcessIdentity[] | null = null;
+        try { processes = await terminalProcesses(e.machine_id, pane.pane_id, pane.terminal_id); } catch { /* no foreground agent yet */ }
+        if (pending.processes && (!processes || !sameProcess(pending.processes, processes))) throw new Error("启动期间进程已退出或替换，消息未发送");
+        if (processes) pending.processes = processes;
+        await sleepUnless(Math.min(250, Math.max(1, deadline - Date.now())), wait.signal);
+      }
+      wait.signal.throwIfAborted();
+      if (!this.dispatching) throw new Error("服务正在停止，消息未发送");
+    } finally {
+      this.startupWaits.delete(e.id); this.customWaits.delete(e.id); this.changed();
     }
   }
 
@@ -635,6 +715,7 @@ export class Engine {
       else if (unsentNewExecution(e)) target = fresh;
       else throw new Error("请先点击「恢复原会话」，在终端确认恢复后，再次发送本轮任务。旧任务不会自动重发。");
     }
+    if (target.agent_kind === "custom" && target.target_kind === "new") throw new Error("启动命令不保存在历史中，请在本任务的新增 Agent 中重新填写命令");
     // A concurrent refresh may have changed the record while the machine answered.
     if (this.store.execution(e.id)?.state !== e.state) throw new Error("任务状态已变化，请重新检查后再发送");
     this.assertAccepting();

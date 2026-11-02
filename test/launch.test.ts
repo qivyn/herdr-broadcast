@@ -134,22 +134,26 @@ test("managed restart drains accepted sends, preserves results and serves the sa
     const target = { machine_id: "local", machine_label: "Local", target_kind: "existing" as const, agent_kind: "claude", pane_id: agent.pane_id, terminal_id: agent.terminal_id };
     const submit = async (prompt: string) => {
       const url = `http://127.0.0.1:${port}`;
-      const response = await fetch(url + "/api/broadcasts", { method: "POST", headers: { origin: url, "content-type": "application/json" },
-        body: JSON.stringify({ prompt, targets: [{ machine: "local", pane: agent.pane_id, terminal_id: agent.terminal_id }] }) });
+      const id = store.createBroadcast({ title: "legacy", prompt: "previous", executions: [target] });
+      const e = store.executions(id)[0]!; store.update(e.id, { state: "sent" });
+      const headers = { origin: url, "content-type": "application/json" };
+      expect((await fetch(url + `/api/executions/${e.id}/confirm-session`, { method: "POST", headers, body: JSON.stringify({ terminal_id: agent.terminal_id }) })).ok).toBe(true);
+      const response = await fetch(url + `/api/broadcasts/${id}/follow-up`, { method: "POST", headers,
+        body: JSON.stringify({ prompt, targets: [{ execution_id: e.id, terminal_id: agent.terminal_id }] }) });
       expect(response.ok).toBe(true); return (await response.json() as any).id as number;
     };
     const first = await submit("first"), second = await submit("second");
-    await until(() => store.executions(first)[0]!.sent_at !== null, 10_000);
+    await until(() => store.executions(first).at(-1)!.sent_at !== null, 10_000);
     const before = (await webStatus(store)).pid;
     const restarted = await restartWeb(store);
     if (restarted.how === "failed") throw new Error(restarted.error + "\n" + await Bun.file(join(fake.dir, "web.log")).text());
     expect(restarted.how).toBe("started");
     expect((await webStatus(store)).pid).not.toBe(before);
-    expect(store.executions(first)[0]!.state).toBe("sent");
-    expect(store.executions(second)[0]!.state).toBe("sent");
+    expect(store.executions(first).at(-1)!.state).toBe("sent");
+    expect(store.executions(second).at(-1)!.state).toBe("sent");
     expect(fake.server().prompts.map(p => p.text)).toEqual(["first", "second"]);
     fake.quickTurn("local", agent.pane_id);
-    await until(() => store.executions(second)[0]!.state === "sent", 12_000);
+    await until(() => store.executions(second).at(-1)!.state === "sent", 12_000);
     expect(fake.server().prompts.map(p => p.text)).toEqual(["first", "second"]);
     expect(store.db.query("SELECT * FROM locks WHERE name = 'worker'").all()).toEqual([]);
   } finally {

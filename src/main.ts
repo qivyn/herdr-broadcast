@@ -16,8 +16,8 @@
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { loadConfig } from "./config.ts";
-import { Store, defaultDbPath, type NewExecution } from "./db.ts";
-import { agentGet, HerdrError, LOCAL, machineList } from "./herdr.ts";
+import { Store, defaultDbPath } from "./db.ts";
+import { HerdrError, LOCAL, machineList } from "./herdr.ts";
 import { runHook } from "./worker.ts";
 import { applyLocalWeb, restartWeb, startWebDetached, stateDir, stopWeb, webStatus, webUrl } from "./web/launch.ts";
 
@@ -25,8 +25,11 @@ const USAGE = `usage:
   main.ts web | web-start | web-stop | web-restart | web-apply | web-status
   main.ts hook
   main.ts list
-  main.ts send --prompt TEXT [--title TEXT] [--to [MACHINE/]PANE]... [--new [MACHINE/]KIND@DIR[*COUNT]]...
-      --to     an agent already running, e.g. --to w2:p1 or --to gpu-box/w1:p3
+  main.ts send --prompt TEXT [--title TEXT] [--new [MACHINE/]KIND@DIR[*COUNT]]... [--custom JSON]...
+  main.ts follow-up --broadcast ID --prompt TEXT [--execution ID]... [--new SPEC]... [--custom JSON]...
+  main.ts confirm-startup --execution ID --terminal-id ID
+      --custom JSON: {"machine":"local","kind":"custom","cwd":"~/repo","command":"my-agent","label":"My Agent","count":1}
+      --execution selects a participant record printed by list; follow-up stays in that broadcast.
       --new    agents to start, e.g. --new claude@~/src/app*2 or --new gpu-box/codex@~/repo
       MACHINE is a saved machine's id or label; without one it is this machine.`;
 
@@ -37,7 +40,7 @@ function list(): void {
   for (const b of store.listBroadcasts()) {
     console.log(`#${b.id}  ${b.title}  (${b.total})  ${JSON.stringify(b.counts)}`);
     for (const e of store.executions(b.id)) {
-      console.log(`    ${e.id}  ${e.machine_label}  ${e.agent_kind ?? "?"}  ${e.pane_id ?? "-"}  ${e.state}${e.note ? `  · ${e.note}` : ""}${e.error ? `  ! ${e.error}` : ""}`);
+      console.log(`    ${e.id}  round ${store.getRound(e.round_id)?.number}  ${e.machine_label}  ${e.agent_kind ?? "?"}  ${e.pane_id ?? "-"}  ${e.state}${e.note ? `  · ${e.note}` : ""}${e.error ? `  ! ${e.error}` : ""}`);
     }
   }
   store.close();
@@ -49,51 +52,71 @@ function flagValues(args: string[], name: string): string[] {
   return values;
 }
 
-async function send(args: string[]): Promise<void> {
-  const prompt = flagValues(args, "--prompt")[0];
-  if (!prompt) throw new Error(`--prompt is required\n${USAGE}`);
-  const profiles = await machineList().catch(() => []);
-  const machineOf = (spec: string): { id: string; label: string; rest: string } => {
-    const slash = spec.indexOf("/");
-    // a local folder may hold slashes: a machine prefix is the part before the first one, if it names a machine
-    const head = slash > 0 ? spec.slice(0, slash) : "";
-    const profile = head ? profiles.find((p) => p.id === head || p.label === head) : undefined;
-    if (profile) return { id: profile.id, label: profile.label, rest: spec.slice(slash + 1) };
-    if (head === LOCAL) return { id: LOCAL, label: "本机", rest: spec.slice(slash + 1) };
-    return { id: LOCAL, label: "本机", rest: spec };
-  };
-  const executions: NewExecution[] = [];
-  for (const spec of flagValues(args, "--to")) {
-    const { id, label, rest } = machineOf(spec);
-    const agent = await agentGet(id, rest);
-    executions.push({ machine_id: id, machine_label: label, target_kind: "existing", agent_kind: agent.agent ?? agent.display_agent ?? "agent", agent_name: agent.name ?? null, cwd: agent.foreground_cwd ?? agent.cwd ?? null,
-      pane_id: agent.pane_id, terminal_id: agent.terminal_id, workspace_id: agent.workspace_id, tab_id: agent.tab_id,
-      session_kind: agent.agent_session?.kind ?? null, session_value: agent.agent_session?.value ?? null });
-  }
-  let slot = 0;
-  for (const spec of flagValues(args, "--new")) {
-    const { id, label, rest } = machineOf(spec);
-    const match = /^([a-z0-9_-]+)@(.+?)(?:\*(\d+))?$/.exec(rest);
-    if (!match) throw new Error(`--new ${spec}: expected KIND@DIR[*COUNT]`);
-    for (let n = 0; n < Number(match[3] ?? "1"); n += 1) {
-      slot += 1;
-      executions.push({ machine_id: id, machine_label: label, target_kind: "new", agent_kind: match[1]!, cwd: match[2]!, slot });
-    }
-  }
-  if (executions.length === 0) throw new Error(`no targets: give --to or --new\n${USAGE}`);
-  const title = flagValues(args, "--title")[0] ?? prompt.split("\n").find((l) => l.trim())!.trim().slice(0, 60);
+async function apiRequest(path: string, body?: unknown): Promise<any> {
   const url = webUrl({ path: defaultDbPath(false) } as Store);
   const token = loadConfig().webToken;
   const headers: Record<string, string> = { "content-type": "application/json", origin: new URL(url).origin };
   if (token) headers.authorization = `Bearer ${token}`;
   let response: Response;
-  try { response = await fetch(new URL("api/broadcasts", url), { method: "POST", headers, body: JSON.stringify({ title, prompt,
-    targets: executions.filter(e => e.target_kind === "existing").map(e => ({ machine: e.machine_id, pane: e.pane_id, terminal_id: e.terminal_id, agent_kind: e.agent_kind, session_kind: e.session_kind, session_value: e.session_value })),
-    new: executions.filter(e => e.target_kind === "new").map(e => ({ machine: e.machine_id, kind: e.agent_kind, cwd: e.cwd, count: 1 })),
-  }) }); } catch { throw new Error("Broadcast Web 服务未运行，请先运行 web-start；没有保存或派发任务"); }
-  const result = await response.json() as { id: number; executions: number; error?: { message: string } };
+  try { response = await fetch(new URL(path, url), { method: body === undefined ? "GET" : "POST", headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); }
+  catch { throw new Error("Broadcast Web 服务未运行，请先运行 web-start；没有保存或派发任务"); }
+  const result = await response.json() as any;
   if (!response.ok) throw new Error(result.error?.message ?? `HTTP ${response.status}`);
-  console.log(`broadcast #${result.id}: ${result.executions} execution(s)`);
+  return result;
+}
+
+function positiveId(value: string | undefined, flag: string): number {
+  const id = Number(value);
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error(`${flag} requires a positive integer`);
+  return id;
+}
+
+async function send(args: string[], follow = false): Promise<void> {
+  if (args.includes("--to")) throw new Error("send --to 已移除：请使用 follow-up --broadcast ID --execution ID 在指定任务中继续广播");
+  const prompt = flagValues(args, "--prompt")[0];
+  if (!prompt?.trim()) throw new Error(`--prompt is required\n${USAGE}`);
+  const broadcast = follow ? positiveId(flagValues(args, "--broadcast")[0], "--broadcast") : null;
+  if (!follow && (args.includes("--execution") || args.includes("--broadcast"))) throw new Error("已有参与者请使用 follow-up --broadcast ID --execution ID");
+  if (follow && args.includes("--title")) throw new Error("follow-up 不修改任务标题");
+  const profiles = await machineList().catch(() => []);
+  const machineOf = (spec: string) => {
+    const slash = spec.indexOf("/");
+    const head = slash > 0 ? spec.slice(0, slash) : "";
+    const profile = head ? profiles.find(p => p.id === head || p.label === head) : undefined;
+    return profile || head === LOCAL ? { id: profile?.id ?? LOCAL, rest: spec.slice(slash + 1) } : { id: LOCAL, rest: spec };
+  };
+  const fresh: { machine: string; kind: string; cwd: string; count?: number; command?: string; label?: string }[] = [];
+  for (const spec of flagValues(args, "--new")) {
+    const { id, rest } = machineOf(spec);
+    const match = /^([a-z0-9_-]+)@(.+?)(?:\*(\d+))?$/.exec(rest);
+    if (!match) throw new Error(`--new ${spec}: expected KIND@DIR[*COUNT]`);
+    fresh.push({ machine: id, kind: match[1]!, cwd: match[2]!, count: Number(match[3] ?? 1) });
+  }
+  for (const value of flagValues(args, "--custom")) {
+    let spec;
+    try { spec = JSON.parse(value); } catch { throw new Error("--custom requires a JSON object"); }
+    if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("--custom requires a JSON object");
+    const named = spec.machine ?? LOCAL;
+    const machine = profiles.find(p => p.id === named || p.label === named)?.id ?? named;
+    fresh.push({ machine, kind: "custom", cwd: spec.cwd, count: spec.count ?? 1, command: spec.command, ...(spec.label === undefined ? {} : { label: spec.label }) });
+  }
+  const ids = flagValues(args, "--execution").map(v => positiveId(v, "--execution"));
+  if (!fresh.length && !ids.length) throw new Error("至少指定 --new、--custom 或 follow-up 的 --execution");
+  let targets: { execution_id: number; terminal_id: string }[] = [];
+  if (ids.length) {
+    const state = await apiRequest("api/state");
+    const b = state.state.broadcasts.find((b: any) => b.id === broadcast);
+    if (!b) throw new Error("原广播记录不存在");
+    targets = ids.map(id => {
+      const e = b.executions.find((e: any) => e.id === id);
+      if (!e?.terminal_id) throw new Error("所选执行记录不属于此任务或没有可用终端");
+      return { execution_id: id, terminal_id: e.terminal_id };
+    });
+  }
+  const result = await apiRequest(follow ? `api/broadcasts/${broadcast}/follow-up` : "api/broadcasts", {
+    prompt, new: fresh, ...(follow ? { targets } : { title: flagValues(args, "--title")[0] }),
+  });
+  console.log(`broadcast #${result.id} round ${result.round_number}: ${result.executions} agents; execution IDs: ${result.execution_ids.join(", ")}`);
 }
 
 const [command = "", ...rest] = process.argv.slice(2);
@@ -157,6 +180,13 @@ try {
       } else console.log(await runHook(null, process.env.HERDR_PLUGIN_EVENT));
       break;
     }
+    case "follow-up":
+      await send(rest, true);
+      break;
+    case "confirm-startup":
+      await apiRequest(`api/executions/${positiveId(flagValues(rest, "--execution")[0], "--execution")}/confirm-startup`, { terminal_id: flagValues(rest, "--terminal-id")[0] });
+      console.log("已确认本次启动；不会重复发送");
+      break;
     case "send":
       await send(rest);
       break;
