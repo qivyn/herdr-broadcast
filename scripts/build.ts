@@ -16,7 +16,7 @@ async function run(cmd: string[], cwd: string) {
 try {
   mkdirSync(output, { recursive: true });
   // Explicit allowlist: no user configs, databases, logs or credentials enter the package.
-  for (const file of ["src", "scripts", "test", "docs/plans", "package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "README.md", "LICENSE"]) {
+  for (const file of ["src", "scripts", "test", "docs/plans", "docs/images", "docs/usage.md", "docs/development.md", "package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "README.md", "README.zh-CN.md", "LICENSE"]) {
     cpSync(join(root, file), join(stage, file), { recursive: true });
   }
   const version = JSON.parse(readFileSync(join(stage, "package.json"), "utf8")).version as string;

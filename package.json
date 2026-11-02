@@ -1,9 +1,9 @@
 {
   "name": "herdr-broadcast",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Herdr plugin: send one prompt to many agents and record delivery results",
+  "description": "Herdr plugin for multi-agent prompt broadcasts, follow-up rounds, and live terminals",
   "scripts": {
     "web": "bun src/main.ts web",
     "typecheck": "tsc --noEmit",
