@@ -40,7 +40,12 @@ try {
   const e = store.executions(id)[0]!;
   const pane = { pane_id: e.pane_id!, terminal_id: e.terminal_id! };
   await until(async () => { try { await terminalProcesses("local", pane.pane_id, pane.terminal_id); return true; } catch { return false; } }, "process started");
-  await Bun.sleep(400);
+  // A foreground process can be visible before the startup observer has verified it.
+  await until(() => {
+    const current = store.execution(e.id)!;
+    assert.equal(current.state, "starting", JSON.stringify(current));
+    return !!(web!.engine as any).customWaits.get(e.id)?.processes;
+  }, "startup observer captured the foreground process");
   assert.deepEqual(received(), []);
   assert.equal((await request(`/api/executions/${e.id}/confirm-startup`, { terminal_id: e.terminal_id })).ok, true);
   await until(() => store.execution(e.id)?.state === "sent", "first delivery");

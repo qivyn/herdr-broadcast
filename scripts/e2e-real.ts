@@ -30,8 +30,13 @@ const fresh = (count: number) => [{ machine: "local", kind: "custom", cwd: envir
   command: `${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dir, "fake-agent.ts"))} fakebot 4` }];
 async function confirm(e: Execution) {
   await until(async () => (await agentList("local")).some(a => a.pane_id === e.pane_id && a.agent_status === "idle"), "fake ready");
-  // Let the startup observer capture the stable CLI after its initial report subprocess exits.
-  await Bun.sleep(400);
+  // Agent reports precede the startup observer's process checks. Synchronize with that
+  // observer instead of assuming it finishes within 400 ms on a shared CI runner.
+  await until(() => {
+    const current = store.execution(e.id)!;
+    assert.equal(current.state, "starting", JSON.stringify(current));
+    return !!(web!.engine as any).customWaits.get(e.id)?.processes;
+  }, "startup observer captured the foreground process");
   assert.deepEqual(receipts(e), []);
   await post(`/api/executions/${e.id}/confirm-startup`, { terminal_id: e.terminal_id });
 }
