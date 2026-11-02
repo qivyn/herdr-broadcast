@@ -1,8 +1,8 @@
 id = "herdr-broadcast"
 name = "Broadcast"
-version = "0.3.1"
+version = "0.4.0"
 min_herdr_version = "0.9.5"
-description = "Send one prompt to many agents (existing or new, local or over SSH) from a web page, and watch every agent's screen as it works"
+description = "Broadcast prompts to multiple AI agents, continue in rounds, and watch live terminals on local or SSH machines"
 platforms = ["linux", "macos"]
 
 # Bun runs TypeScript directly; install the locally served terminal assets.

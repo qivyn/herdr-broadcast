@@ -16,7 +16,7 @@ async function run(cmd: string[], cwd: string) {
 try {
   mkdirSync(output, { recursive: true });
   // Explicit allowlist: no user configs, databases, logs or credentials enter the package.
-  for (const file of ["src", "scripts", "test", "docs/plans", "package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "README.md", "LICENSE"]) {
+  for (const file of ["src", "scripts", "test", "docs/images", "docs/usage.md", "docs/development.md", "package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "README.md", "README.zh-CN.md", "LICENSE"]) {
     cpSync(join(root, file), join(stage, file), { recursive: true });
   }
   const version = JSON.parse(readFileSync(join(stage, "package.json"), "utf8")).version as string;
@@ -26,7 +26,7 @@ try {
   await run([process.execPath, "install", "--production", "--frozen-lockfile"], stage);
   if (readFileSync(join(stage, "bun.lock"), "utf8") !== readFileSync(join(root, "bun.lock"), "utf8")) throw new Error("Install changed the lockfile");
   const runtime = JSON.parse(await run([process.execPath, "src/service/entry.ts", "describe"], stage));
-  for (const path of ["src/web/page.js", "src/web/terminal.js"]) new Bun.Transpiler({ loader: "js" }).transformSync(readFileSync(join(stage, path), "utf8"));
+  for (const path of ["src/web/page.js", "src/web/terminal.js", "src/web/i18n.js"]) new Bun.Transpiler({ loader: "js" }).transformSync(readFileSync(join(stage, path), "utf8"));
   const assets = JSON.parse(await run([process.execPath, "src/service/entry.ts", "assets"], stage)) as { name: string; path: string }[];
   for (const asset of assets) if (!readFileSync(asset.path).length) throw new Error(`Empty runtime asset: ${asset.name}`);
   const revision = await run(["git", "rev-parse", "HEAD"], root);

@@ -22,7 +22,9 @@ if (!pane) {
 
 let seq = 1;
 async function report(state: string): Promise<void> {
-  const proc = Bun.spawn([bin, "pane", "report-agent", pane!, "--source", "fake-agent", "--agent", kind, "--state", state, "--seq", String(seq++)], { stdout: "ignore", stderr: "inherit" });
+  // Reporting is test instrumentation, not part of the interactive foreground job.
+  // Keep its short-lived CLI out of the custom Agent's process identity snapshot.
+  const proc = Bun.spawn([bin, "pane", "report-agent", pane!, "--source", "fake-agent", "--agent", kind, "--state", state, "--seq", String(seq++)], { detached: true, stdin: "ignore", stdout: "ignore", stderr: "inherit" });
   await proc.exited;
 }
 
