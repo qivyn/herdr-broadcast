@@ -92,7 +92,6 @@ For another device, configure authentication and allowed hosts before using a tu
 
 - [Usage reference](docs/usage.md): configuration, service commands, SSH, recovery, CLI, and HTTP API.
 - [Development guide](docs/development.md): local setup, architecture, verification, and releases.
-- [Design plan](docs/plans/broadcast-rounds-and-custom-agents.md): task, round, and custom-agent behavior.
 
 Bug reports and pull requests are welcome. For a bug, include your OS, Herdr and Bun versions, the agent involved, and reproduction steps. Remove prompts, terminal output, tokens, and other private data you do not want to share.
 

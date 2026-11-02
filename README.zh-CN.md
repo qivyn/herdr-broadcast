@@ -92,7 +92,6 @@ herdr plugin action invoke qivyn.herdr-broadcast.web-status
 
 - [使用参考](docs/usage.md)：配置、服务命令、SSH、恢复、CLI 和 HTTP API。
 - [开发指南](docs/development.md)：本地开发、架构、验证和发布流程。
-- [设计计划](docs/plans/broadcast-rounds-and-custom-agents.md)：任务、轮次及自定义 Agent 的行为约定。
 
 欢迎反馈问题和提交 PR。报告问题时，请提供操作系统、Herdr 和 Bun 版本、Agent 类型以及复现步骤；删除不希望公开的指令、终端输出、令牌等私密内容。
 
