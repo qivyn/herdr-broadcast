@@ -26,7 +26,7 @@ try {
   await run([process.execPath, "install", "--production", "--frozen-lockfile"], stage);
   if (readFileSync(join(stage, "bun.lock"), "utf8") !== readFileSync(join(root, "bun.lock"), "utf8")) throw new Error("Install changed the lockfile");
   const runtime = JSON.parse(await run([process.execPath, "src/service/entry.ts", "describe"], stage));
-  for (const path of ["src/web/page.js", "src/web/terminal.js"]) new Bun.Transpiler({ loader: "js" }).transformSync(readFileSync(join(stage, path), "utf8"));
+  for (const path of ["src/web/page.js", "src/web/terminal.js", "src/web/i18n.js"]) new Bun.Transpiler({ loader: "js" }).transformSync(readFileSync(join(stage, path), "utf8"));
   const assets = JSON.parse(await run([process.execPath, "src/service/entry.ts", "assets"], stage)) as { name: string; path: string }[];
   for (const asset of assets) if (!readFileSync(asset.path).length) throw new Error(`Empty runtime asset: ${asset.name}`);
   const revision = await run(["git", "rev-parse", "HEAD"], root);

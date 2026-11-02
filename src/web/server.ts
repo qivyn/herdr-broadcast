@@ -317,15 +317,17 @@ export function startWebServer(store: Store, options: WebOptions = webOptions(),
 function serve(store: Store, engine: Engine, options: WebOptions, updates: Partial<UpdaterOptions> | UpdateController = {}, environmentRunner?: EnvironmentRunner) {
   const page = readFileSync(join(import.meta.dir, "page.html"), "utf8");
   const script = readFileSync(join(import.meta.dir, "page.js"), "utf8");
+  const i18n = readFileSync(join(import.meta.dir, "i18n.js"), "utf8");
   const icon = readFileSync(join(import.meta.dir, "icon.svg"), "utf8");
   // What this server hands the browser: a page loaded from another server's files reloads itself.
   // The files, not a commit: a restart on uncommitted changes serves new files under the same commit.
   const instance = options.runtime?.bootId ?? randomUUID();
   let accepting = !options.paused;
   let requests = 0;
-  const build = createHash("sha256").update(page).update(script).update(readFileSync(join(import.meta.dir, "terminal.js"))).digest("hex").slice(0, 16);
+  const build = createHash("sha256").update(page).update(script).update(i18n).update(readFileSync(join(import.meta.dir, "terminal.js"))).digest("hex").slice(0, 16);
   const assets = new Map(terminalAssets().map((asset) => [`/vendor/${asset.name}`, asset]));
   assets.set("/terminal.js", { name: "terminal.js", path: join(import.meta.dir, "terminal.js"), type: "text/javascript" });
+  assets.set("/i18n.js", { name: "i18n.js", path: join(import.meta.dir, "i18n.js"), type: "text/javascript; charset=utf-8" });
   const terminals = new Set<TerminalBridge>();
   const streams = new Set<ReadableStreamDefaultController<string>>();
   const unwatch = new Map<string, () => void>();

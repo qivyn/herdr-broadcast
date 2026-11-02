@@ -249,7 +249,7 @@ for (const failure of ["dependencies", "typecheck", "resources"]) test(`stage va
   expect(calls[0]).toEqual([process.execPath, "install", "--frozen-lockfile"]); expect(steps.at(-1)).toBe(failure);
 });
 test("validation refreshes generated browser assets from staged dependencies", async () => {
-  for (const f of ["package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "src/web/page.html", "src/web/page.js", "src/web/terminal.js", "src/web/icon.svg", "src/web/vendor/terminal.js"]) {
+  for (const f of ["package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "src/web/page.html", "src/web/page.js", "src/web/i18n.js", "src/web/terminal.js", "src/web/icon.svg", "src/web/vendor/terminal.js"]) {
     mkdirSync(join(dir, f, ".."), { recursive: true }); writeFileSync(join(dir, f), "old");
   }
   const asset = join(dir, "dependency.js"); writeFileSync(asset, "new dependency");

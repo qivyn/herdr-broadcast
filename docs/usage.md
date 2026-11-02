@@ -2,6 +2,10 @@
 
 [English overview](../README.md) · [中文介绍](../README.zh-CN.md) · [Development](development.md)
 
+## Interface language
+
+The page supports English and Simplified Chinese. It uses the first supported browser language on the first visit, with English as the fallback. Choose **Settings → Language** to save a preference for this browser. Changing language reloads the page; it does not restart the service or send any instructions. Prompts, user names, commands, paths, session IDs, and Agent terminal output retain their original content. External tool diagnostics may retain the tool’s original language.
+
 ## Configuration
 
 Find the configuration directory for a GitHub installation:
@@ -53,7 +57,7 @@ The web service runs independently of Herdr's terminal UI. Closing a browser or 
 
 A new task creates new agents and records round 1. A follow-up adds a round to that task using existing participants, new agents, or both. Existing participants must belong to the task. New agents receive only the current instruction; no history summary or earlier round is automatically sent to them.
 
-The same task's new agents on a machine share a workspace, with a separate tab and working directory for each agent. Their native conversations stay independent. An independent task created with **另建广播** copies the selected round's input and compatible new-agent configuration, not its running instances. Custom commands must be entered again.
+The same task's new agents on a machine share a workspace, with a separate tab and working directory for each agent. Their native conversations stay independent. An independent task created with **New broadcast from this round** copies the selected round's input and compatible new-agent configuration, not its running instances. Custom commands must be entered again.
 
 | Result | Meaning |
 | --- | --- |
@@ -69,13 +73,13 @@ These are delivery results, separate from the agent's live `working`, `idle`, `d
 
 There is no persisted dispatcher or automatic retry. Refresh, reconnection, session restoration, and service restart never initiate delivery. Same-terminal paste/Enter operations are serialized to keep text from interleaving. Check any existing terminal draft before submitting another instruction.
 
-**再次发送本轮任务** explicitly appends a retry round after verifying the conversation; duplicate retry requests reuse that retry round. **中断 agent** sends Ctrl+C to the current verified agent, without retracting prior input or rewriting delivery history. **删除记录** removes history only and is blocked while sends or launches are in flight.
+**Send this round again** explicitly appends a retry round after verifying the conversation; duplicate retry requests reuse that retry round. **Interrupt Agent** sends Ctrl+C to the current verified agent, without retracting prior input or rewriting delivery history. **Delete record** removes history only and is blocked while sends or launches are in flight.
 
 ## Machines and session components
 
-Use Herdr's saved SSH profiles, visible in the **机器** page. These are separate from herdr-web-ui's own machine connections. Remote working directories must be absolute or start with `~/`.
+Use Herdr's saved SSH profiles, visible in the **Machines** page. These are separate from herdr-web-ui's own machine connections. Remote working directories must be absolute or start with `~/`.
 
-The picker inspects programs on the selected machine. Session components let Herdr report conversation identity; install or update them individually or through **管理全部 Agent**. Installation uses that machine's saved SSH user and environment. Each machine is configured separately. The plugin does not install agent CLIs, dependencies, or model credentials.
+The picker inspects programs on the selected machine. Session components let Herdr report conversation identity; install or update them individually or through **Manage all Agents**. Installation uses that machine's saved SSH user and environment. Each machine is configured separately. The plugin does not install agent CLIs, dependencies, or model credentials.
 
 The built-in picker offers Claude Code, Codex, Pi, OMP, OpenCode, Kimi, Antigravity, Grok, and Qwen. Support for starting and restoring a tool still depends on its installed CLI, integration, version, and native history. Automated argument tests do not establish live compatibility with every CLI version.
 
@@ -85,7 +89,7 @@ Ready components need no repeated setup. Successful installation updates the cur
 
 A custom entry accepts machine, directory, display name, a single-line startup command, and a count from 1 to 20. Commands can be at most 16384 characters; names can be at most 120 characters. Use an interactive process that continues accepting terminal input.
 
-Each custom agent gets a new terminal. Complete login, trust, and other startup steps, ensure the command has entered a new conversation, then confirm **已进入新对话，发送本轮输入**. Before confirmation no task prompt is sent. Repeated confirmation cannot duplicate delivery. Cancellation, timeout, process/terminal replacement, or service shutdown ends the attempt without replay.
+Each custom agent gets a new terminal. Complete login, trust, and other startup steps, ensure the command has entered a new conversation, then confirm **Ready in a new conversation; send this round**. Before confirmation no task prompt is sent. Repeated confirmation cannot duplicate delivery. Cancellation, timeout, process/terminal replacement, or service shutdown ends the attempt without replay.
 
 The command exists only in the accepted operation's memory. It is not saved in execution history, browser drafts, or routine plugin logs; it can still appear in the target terminal and its shell history. Starting it again requires entering the command again. Custom commands have no one-click session-component installer.
 
@@ -95,15 +99,15 @@ Python 3 is required for foreground process checks. Custom-agent bindings identi
 
 Live terminals reconnect after browser or network interruptions. When another client takes terminal control, Broadcast pauses its connection rather than repeatedly taking control back. Returning to the page or deliberately clicking the terminal grants one takeover attempt. Unsent terminal keystrokes are not replayed.
 
-An exited agent stays closed until you choose **继续对话**. Recovery uses the original machine, directory, and native history. It does not copy history elsewhere or replay the round prompt. **新建对话** opens a fresh conversation without copying the old task.
+An exited agent stays closed until you choose **Continue conversation**. Recovery uses the original machine, directory, and native history. It does not copy history elsewhere or replay the round prompt. **New conversation** opens a fresh conversation without copying the old task.
 
 If a native identity was saved, the plugin verifies it before using the terminal. If identity is missing, it can look for a unique matching history entry or open a supported native history picker. Ambiguous identity remains unknown until explicit selection or confirmation. Python 3 is needed for history-based checks; native history must remain available on the original machine. The plugin does not archive terminal output.
 
-Custom-agent recovery opens a plain terminal in the original directory. Start your program, select its original history, and confirm **已恢复此会话**. The saved startup command is never automatically executed.
+Custom-agent recovery opens a plain terminal in the original directory. Start your program, select its original history, and confirm **I restored this conversation**. The saved startup command is never automatically executed.
 
 ## Updates
 
-GitHub installations offer a newer published stable GitHub Release from **设置**, followed by explicit **更新并重启**. Update checks do not track unreleased branch commits. A running version at or above the latest release is not downgraded.
+GitHub installations offer a newer published stable GitHub Release from **Settings**, followed by explicit **Update and restart**. Update checks do not track unreleased branch commits. A running version at or above the latest release is not downgraded.
 
 The updater validates and stages the exact release commit before switching runtime. Restart alone keeps the confirmed runtime. Dirty plugin checkouts or conflicting installation metadata may require you to resolve local changes first. The independent launcher, manager, and web service keep their own runtime snapshots; stopping and starting is not a substitute for applying source changes during development.
 

@@ -414,9 +414,9 @@
   .round-label { color: var(--text); font-weight: 500; }
   .round-meta { color: var(--text-3); }
   .round-expand { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--text-3); }
-  .round-expand::before { content: "展开"; }
+  .round-expand::before { content: attr(data-expand); }
   .round-expand::after { content: ""; width: 5px; height: 5px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(45deg) translateY(-2px); }
-  .round-instruction[open] .round-expand::before { content: "收起"; }
+  .round-instruction[open] .round-expand::before { content: attr(data-collapse); }
   .round-instruction[open] .round-expand::after { transform: rotate(225deg) translate(-1px, -1px); }
   .round-prompt { max-height: min(240px, 30vh); overflow: auto; overscroll-behavior: contain; margin-bottom: 12px; padding: 12px 14px; border-radius: 6px; background: var(--surface-2); white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.7 var(--sans); }
   .followup-composer { display: flex; flex-direction: column; gap: 8px; margin: 0 0 8px; padding: 12px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px; }
@@ -667,19 +667,21 @@
   .prep-manager .prep-agent { padding: 11px 12px; }
   .prep-manager .prep-group>summary span { display: block; margin: 3px 0 0 15px; }
 }
+.language-choices { display: flex; gap: 8px; flex-wrap: wrap; }
+.language-panel .sub { margin-top: 10px; }
 </style>
 </head>
 <body>
 <div class="app">
-  <aside class="sidebar" aria-label="广播任务">
+  <aside class="sidebar" aria-label="广播任务" data-i18n-aria-label="广播任务">
     <div class="sidebar-top">
-      <div class="brand">Herdr 广播 <span class="brand-side"><button class="bell" id="bell" type="button" hidden></button></span></div>
-      <button class="new-btn" id="new" title="新建广播（N）"><span class="plus" aria-hidden="true">+</span>新建广播</button>
-      <button class="new-btn nav-machines" id="machines" type="button" title="管理机器"><span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2" y="9" width="12" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="4.6" cy="4.75" r=".9" fill="currentColor"/><circle cx="4.6" cy="11.25" r=".9" fill="currentColor"/></svg></span><span class="nav-text">机器<span class="nav-machines-list" id="machines-list"></span></span></button>
-      <input class="search" id="search" type="search" placeholder="搜索广播（/）" aria-label="搜索广播">
+      <div class="brand"><span data-i18n="Herdr 广播">Herdr 广播</span> <span class="brand-side"><button class="bell" id="bell" type="button" hidden></button></span></div>
+      <button class="new-btn" id="new" title="新建广播（N）" data-i18n-title="新建广播（N）"><span class="plus" aria-hidden="true">+</span><span data-i18n="新建广播">新建广播</span></button>
+      <button class="new-btn nav-machines" id="machines" type="button" title="管理机器" data-i18n-title="管理机器"><span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="2" y="9" width="12" height="4.5" rx="1.2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="4.6" cy="4.75" r=".9" fill="currentColor"/><circle cx="4.6" cy="11.25" r=".9" fill="currentColor"/></svg></span><span class="nav-text"><span data-i18n="机器">机器</span><span class="nav-machines-list" id="machines-list"></span></span></button>
+      <input class="search" id="search" type="search" placeholder="搜索广播（/）" aria-label="搜索广播" data-i18n-placeholder="搜索广播（/）" data-i18n-aria-label="搜索广播">
     </div>
     <nav class="sidebar-list" id="list"></nav>
-    <div class="settings-nav"><button id="settings" type="button"><span aria-hidden="true">⚙</span>设置<span id="update-box" class="update-box" hidden></span></button></div>
+    <div class="settings-nav"><button id="settings" type="button"><span aria-hidden="true">⚙</span><span data-i18n="设置">设置</span><span id="update-box" class="update-box" hidden></span></button></div>
     <div class="sidebar-foot" hidden><button class="btn quiet" id="notify" type="button" hidden></button></div>
   </aside>
   <main class="main" id="main"></main>
@@ -687,6 +689,7 @@
 <script src="/vendor/xterm.js"></script>
 <script src="/vendor/fit.js"></script>
 <script src="/vendor/unicode.js"></script>
+<script src="/i18n.js"></script>
 <script src="/terminal.js"></script>
 <script src="/page.js"></script>
 </body>

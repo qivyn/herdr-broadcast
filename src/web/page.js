@@ -6,16 +6,17 @@
 // A view is built once when it opens and then only patched, so typing and focus are never lost.
 // Text from agents and prompts reaches the page only through textContent.
 "use strict";
+const t = BroadcastI18n.t;
 
 const STATES = {
-  submitting: ["run", "发送中"], starting: ["run", "启动中"], sending: ["run", "发送中"], sent: ["ok", "已发送"],
-  uncertain: ["ask", "发送结果不确定"], failed: ["bad", "发送失败"], cancelled: ["dim", "未发送"],
+  submitting: ["run", t("发送中")], starting: ["run", t("启动中")], sending: ["run", t("发送中")], sent: ["ok", t("已发送")],
+  uncertain: ["ask", t("发送结果不确定")], failed: ["bad", t("发送失败")], cancelled: ["dim", t("未发送")],
   // Old history remains readable; these labels do not describe current agent activity.
-  completed: ["ok", "旧版已结束"], working: ["ok", "已发送"], blocked: ["ok", "已发送"],
-  queued: ["dim", "旧版未发送"], lost: ["ask", "旧版结果未确认"], interrupting: ["dim", "旧版中断记录"], interrupted: ["dim", "旧版已中断"],
+  completed: ["ok", t("旧版已结束")], working: ["ok", t("已发送")], blocked: ["ok", t("已发送")],
+  queued: ["dim", t("旧版未发送")], lost: ["ask", t("旧版结果未确认")], interrupting: ["dim", t("旧版中断记录")], interrupted: ["dim", t("旧版已中断")],
 };
 const ACTIVE = ["submitting", "starting", "sending"];
-const AGENT_STATUS = { idle: "空闲", done: "空闲", working: "工作中", blocked: "等待确认", unknown: "状态未知" };
+const AGENT_STATUS = { idle: t("空闲"), done: t("空闲"), working: t("工作中"), blocked: t("等待确认"), unknown: t("状态未知") };
 /** terminal states whose pane is there to show: a conversation, one being restored, or the shell an agent starts in */
 const SHOWN = ["live", "restoring", "starting", "shell"];
 const SEND_ICON = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -26,12 +27,12 @@ const DRAFT_KEY = "broadcast.draft";
 const PREFILL_KEY = "broadcast.prefill";
 /** the detail page's counts, in the order they matter: who needs you first */
 const SUMMARY = [
-  ["sending", ["submitting", "starting", "sending"], "run", "发送中"],
-  ["uncertain", ["uncertain", "lost"], "ask", "结果不确定"],
-  ["failed", ["failed"], "bad", "发送失败"],
-  ["sent", ["sent", "working", "blocked", "completed"], "ok", "已发送"],
-  ["cancelled", ["cancelled", "queued"], "dim", "未发送"],
-  ["interrupted", ["interrupting", "interrupted"], "dim", "旧版中断记录"],
+  ["sending", ["submitting", "starting", "sending"], "run", t("发送中")],
+  ["uncertain", ["uncertain", "lost"], "ask", t("结果不确定")],
+  ["failed", ["failed"], "bad", t("发送失败")],
+  ["sent", ["sent", "working", "blocked", "completed"], "ok", t("已发送")],
+  ["cancelled", ["cancelled", "queued"], "dim", t("未发送")],
+  ["interrupted", ["interrupting", "interrupted"], "dim", t("旧版中断记录")],
 ];
 
 let data = { state: { machines: [], broadcasts: [] }, agents: [], webUi: { installed: false, running: false }, update: null };
@@ -61,18 +62,18 @@ const $ = (id) => document.getElementById(id);
 
 function ago(ms) {
   const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 60) return "刚刚";
+  if (s < 60) return t("刚刚");
   const m = Math.round(s / 60);
-  if (m < 60) return `${m} 分钟前`;
+  if (m < 60) return t("{0} 分钟前", [m]);
   const hr = Math.round(m / 60);
-  return hr < 48 ? `${hr} 小时前` : `${Math.round(hr / 24)} 天前`;
+  return hr < 48 ? t("{0} 小时前", [hr]) : t("{0} 天前", [Math.round(hr / 24)]);
 }
 
 function duration(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s} 秒`;
+  if (s < 60) return t("{0} 秒", [s]);
   const m = Math.floor(s / 60);
-  return m < 60 ? `${m} 分 ${s % 60} 秒` : `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+  return m < 60 ? t("{0} 分 {1} 秒", [m, s % 60]) : t("{0} 小时 {1} 分", [Math.floor(m / 60), m % 60]);
 }
 
 const tone = (state) => (STATES[state] || ["dim", state])[0];
@@ -96,9 +97,9 @@ function toast(text, error) {
 
 async function api(path, options) {
   const response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options && options.headers) } });
-  const body = await response.json().catch(() => ({}));
+  const body = BroadcastI18n.metadata(await response.json().catch(() => ({})));
   // the status tells a refusal (that asking again will not change) from a server out of reach
-  if (!response.ok) throw Object.assign(new Error((body.error && body.error.message) || `请求失败（${response.status}）`), { status: response.status });
+  if (!response.ok) throw Object.assign(new Error((body.error && body.error.message) || t("请求失败（{0}）", [response.status])), { status: response.status });
   return body;
 }
 const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
@@ -172,7 +173,7 @@ const machineDown = (id) => machineState(id).state === "down";
 
 /** what to do about a machine that does not answer */
 function downReason(id) {
-  return id === "local" ? "Herdr 没在运行，启动 herdr 后会自动恢复" : "连不上这台机器：检查 SSH，或在 Herdr 里重连它";
+  return id === "local" ? t("Herdr 没在运行，启动 herdr 后会自动恢复") : t("连不上这台机器：检查 SSH，或在 Herdr 里重连它");
 }
 
 /** under a machine that does not answer: what to do, and Herdr's own words */
@@ -194,17 +195,17 @@ const shortRev = (rev) => (rev ? rev.slice(0, 7) : "");
 const canUpdatePlugin = (u) => u?.kind === "github";
 /** a version as people read it: its number, or its commit when the number did not change */
 function versionText(version, revision) {
-  return version ? `v${version}${revision ? ` · ${shortRev(revision)}` : ""}` : shortRev(revision) || "未知版本";
+  return version ? `v${version}${revision ? ` · ${shortRev(revision)}` : ""}` : shortRev(revision) || t("未知版本");
 }
 
 /** what the update is doing, in a few words; null while there is nothing to say */
 function updateLine(u) {
   if (!u) return null;
-  if (u.phase === "updating") return ({ download: "正在准备新版…", dependencies: "正在安装依赖…", typecheck: "正在验证代码…", resources: "正在检查运行资源…", register: "正在登记插件…" })[u.step] || "正在更新服务…";
-  if (u.phase === "restarting") return "正在重启服务…";
-  if (u.phase === "checking") return "正在检查更新…";
-  if (u.phase === "error") return `${u.action === "restart" ? "重启失败" : "更新失败"}：${u.error}`;
-  if (canUpdatePlugin(u) && u.available) return `有新版本 ${versionText(u.latest_version, u.latest_revision)}`;
+  if (u.phase === "updating") return ({ download: t("正在准备新版…"), dependencies: t("正在安装依赖…"), typecheck: t("正在验证代码…"), resources: t("正在检查运行资源…"), register: t("正在登记插件…") })[u.step] || t("正在更新服务…");
+  if (u.phase === "restarting") return t("正在重启服务…");
+  if (u.phase === "checking") return t("正在检查更新…");
+  if (u.phase === "error") return `${u.action === "restart" ? t("重启失败") : t("更新失败")}：${u.error}`;
+  if (canUpdatePlugin(u) && u.available) return t("有新版本 {0}", [versionText(u.latest_version, u.latest_revision)]);
   return null;
 }
 
@@ -224,11 +225,11 @@ async function installUpdate() {
     if (result.operationId) {
       watchUpdateOperation(result.operationId, result.instance);
     } else if (result.update.phase === "restarting") {
-      toast("网页正在重启，完成后会自动刷新");
+      toast(t("网页正在重启，完成后会自动刷新"));
       waitForRestart(result.instance);
     } else {
       updateInstalling = false;
-      toast("已是最新版本");
+      toast(t("已是最新版本"));
     }
   } catch (error) {
     updateInstalling = false;
@@ -253,7 +254,7 @@ function watchUpdateOperation(operationId, previousInstance, started = Date.now(
             updateInstalling = false;
             if (configNow.instance && configNow.instance !== previousInstance) return location.reload();
             renderUpdate(); if (view) view.update();
-            toast(u.outcome === "failed" ? u.error || "更新失败，服务仍可使用" : "操作已完成", u.outcome === "failed");
+            toast(u.outcome === "failed" ? u.error || t("更新失败，服务仍可使用") : t("操作已完成"), u.outcome === "failed");
             return;
           }
           renderUpdate(); if (view) view.update();
@@ -261,7 +262,7 @@ function watchUpdateOperation(operationId, previousInstance, started = Date.now(
       }
     } catch { /* the old service may have stopped; the manager continues without this page */ }
     if (Date.now() - started < 30 * 60_000) watchUpdateOperation(operationId, previousInstance, started);
-    else { updateInstalling = false; toast("操作仍可能在后台运行，请在设置中查看进度"); }
+    else { updateInstalling = false; toast(t("操作仍可能在后台运行，请在设置中查看进度")); }
   }, 1500);
 }
 
@@ -276,7 +277,7 @@ function waitForRestart(previousInstance, started = Date.now()) {
       }
     } catch { /* still restarting */ }
     if (Date.now() - started < 180_000) waitForRestart(previousInstance, started);
-    else toast("网页没有在三分钟内重启：请在 Herdr 中运行「Broadcast: 重启服务」，或查看服务日志", true);
+    else toast(t("网页没有在三分钟内重启：请在 Herdr 中运行「Broadcast: 重启服务」，或查看服务日志"), true);
   }, 1500);
 }
 
@@ -284,8 +285,8 @@ function waitForRestart(previousInstance, started = Date.now()) {
 function renderUpdate() {
   const box = $("update-box");
   const u = data.update;
-  const state = u && ({ checking: "检查中…", updating: "更新中…", restarting: "重启中…", error: "操作失败" })[u.phase]
-    || (canUpdatePlugin(u) && u.available ? "有更新" : "");
+  const state = u && ({ checking: t("检查中…"), updating: t("更新中…"), restarting: t("重启中…"), error: t("操作失败") })[u.phase]
+    || (canUpdatePlugin(u) && u.available ? t("有更新") : "");
   box.textContent = state;
   box.hidden = !state;
   renderUpdateNotice();
@@ -321,7 +322,7 @@ function renderUpdateNotice() {
   const shape = JSON.stringify([revision, u.latest_version, u.current_version, u.current_revision, busy, u.phase, u.blocked_reason, error, config.local]);
   if (updateNoticeEl.dataset.shape === shape) return;
   updateNoticeEl.dataset.shape = shape;
-  const reason = !config.local ? "请在运行广播服务的电脑上打开此页更新。" : u.blocked_reason;
+  const reason = !config.local ? t("请在运行广播服务的电脑上打开此页更新。") : u.blocked_reason;
   const dismiss = () => {
     updateDismissal = { revision, until: Date.now() + UPDATE_SNOOZE_MS };
     try { localStorage.setItem(UPDATE_DISMISS_KEY, JSON.stringify(updateDismissal)); } catch { /* keep the in-memory dismissal */ }
@@ -329,17 +330,17 @@ function renderUpdateNotice() {
   };
   updateNoticeEl.replaceChildren(
     h("div", { class: "update-notice-head" },
-      h("strong", { id: "update-notice-title" }, "发现新版本"),
-      h("button", { class: "icon-btn", type: "button", "aria-label": "暂时忽略新版本提醒", onclick: dismiss }, "×")),
+      h("strong", { id: "update-notice-title" }, t("发现新版本")),
+      h("button", { class: "icon-btn", type: "button", "aria-label": t("暂时忽略新版本提醒"), onclick: dismiss }, "×")),
     h("p", { class: "update-notice-version" }, versionText(u.current_version, u.current_revision), " → ", versionText(u.latest_version, u.latest_revision)),
-    h("p", { class: "update-notice-copy" }, reason || "更新后网页会自动重启，agent 的对话会保留。"),
-    ...(error ? [h("p", { class: "update-notice-error", role: "status" }, `更新失败：${error}`)] : []),
+    h("p", { class: "update-notice-copy" }, reason || t("更新后网页会自动重启，agent 的对话会保留。")),
+    ...(error ? [h("p", { class: "update-notice-error", role: "status" }, t("更新失败：{0}", [error]))] : []),
     h("div", { class: "update-notice-actions" },
-      h("button", { class: "btn quiet", type: "button", title: "这个版本 24 小时内不再提醒，仍可在设置里更新", onclick: dismiss }, "暂时忽略"),
-      reason ? h("button", { class: "btn", type: "button", onclick: () => go("#/settings") }, "查看详情")
+      h("button", { class: "btn quiet", type: "button", title: t("这个版本 24 小时内不再提醒，仍可在设置里更新"), onclick: dismiss }, t("暂时忽略")),
+      reason ? h("button", { class: "btn", type: "button", onclick: () => go("#/settings") }, t("查看详情"))
         : h("button", { class: "btn primary", type: "button", disabled: busy, onclick: async () => {
           try { await installUpdate(); } catch (error) { toast(error.message, true); }
-        } }, busy ? (updateLine(u) || "正在更新插件…") : "更新并重启")));
+        } }, busy ? (updateLine(u) || t("正在更新插件…")) : t("更新并重启"))));
 }
 
 /** Whether the reader has text selected inside an element (and so is copying from it). */
@@ -357,7 +358,7 @@ function autogrow(area) {
 }
 
 function sendButton(attrs) {
-  return h("button", { class: "send", type: "submit", title: "发送", "aria-label": "发送", html: SEND_ICON, ...attrs });
+  return h("button", { class: "send", type: "submit", title: t("发送"), "aria-label": t("发送"), html: SEND_ICON, ...attrs });
 }
 
 /** The screens' type size, the reader's choice, kept in this browser. */
@@ -407,7 +408,7 @@ function route() {
 }
 
 function topbar(...children) {
-  return h("div", { class: "topbar" }, h("button", { class: "back", onclick: () => go(""), "aria-label": "返回列表" }, "‹ 广播"), ...children);
+  return h("div", { class: "topbar" }, h("button", { class: "back", onclick: () => go(""), "aria-label": t("返回列表") }, t("‹ 广播")), ...children);
 }
 
 // ---- sidebar, title and notifications ---------------------------------------------------
@@ -418,7 +419,7 @@ function sidebarGroups() {
   const shown = query ? data.state.broadcasts.filter((b) => `${b.title}\n${(b.rounds || []).map(r => r.prompt).join("\n") || b.prompt}`.toLowerCase().includes(query)) : data.state.broadcasts;
   const today = new Date().setHours(0, 0, 0, 0);
   const day = 86_400_000;
-  const groups = [["进行中", []], ["今天", []], ["昨天", []], ["7 天内", []], ["更早", []]];
+  const groups = [[t("进行中"), []], [t("今天"), []], [t("昨天"), []], [t("7 天内"), []], [t("更早"), []]];
   for (const b of shown) {
     const at = b.latest_at || b.created_at;
     const index = ACTIVE.some((s) => b.counts[s]) ? 0 : at >= today ? 1 : at >= today - day ? 2 : at >= today - 7 * day ? 3 : 4;
@@ -439,8 +440,8 @@ function renderSidebar() {
   const currentId = currentBroadcastId();
   const { query, shown, groups } = sidebarGroups();
   list.replaceChildren();
-  if (loaded && data.state.broadcasts.length === 0) list.append(h("div", { class: "group" }, "还没有广播任务"));
-  else if (query && shown.length === 0) list.append(h("div", { class: "group" }, "没有匹配的广播"));
+  if (loaded && data.state.broadcasts.length === 0) list.append(h("div", { class: "group" }, t("还没有广播任务")));
+  else if (query && shown.length === 0) list.append(h("div", { class: "group" }, t("没有匹配的广播")));
   for (const [title, items] of groups) {
     list.append(h("div", { class: "group" }, title));
     for (const b of items) {
@@ -450,8 +451,8 @@ function renderSidebar() {
           h("span", { class: `dot ${broadcastTone(b)}` }),
           h("span", { class: "t" }, b.title),
           waiting
-            ? h("span", { class: "n ask" }, `${b.round_count || 1} 轮 · ${waiting} 个发送结果不确定`)
-            : h("span", { class: "n" }, `${b.round_count || 1} 轮 · 已发送 ${(b.counts.sent || 0) + (b.counts.completed || 0)}/${b.total}　${ago(b.latest_at || b.created_at)}`))));
+            ? h("span", { class: "n ask" }, t("{0} 轮 · {1} 个发送结果不确定", [b.round_count || 1, waiting]))
+            : h("span", { class: "n" }, t("{0} 轮 · 已发送 {1}/{2}　{3}", [b.round_count || 1, (b.counts.sent || 0) + (b.counts.completed || 0), b.total, ago(b.latest_at || b.created_at)])))));
     }
   }
   list.scrollTop = scroll;
@@ -472,13 +473,13 @@ let waitingPrimed = false;
 function noticeWaiting() {
   const waiting = [];
   for (const b of data.state.broadcasts) for (const e of b.executions) if (e.state === "blocked") waiting.push({ b, e });
-  document.title = waiting.length ? `(${waiting.length}) Herdr 广播` : "Herdr 广播";
+  document.title = waiting.length ? t("({0}) Herdr 广播", [waiting.length]) : t("Herdr 广播");
   for (const { b, e } of waiting) {
     if (waitingSeen.has(e.id)) continue;
     waitingSeen.add(e.id);
     // the first load is not news
     if (!waitingPrimed || !document.hidden || !("Notification" in window) || Notification.permission !== "granted" || !notifySwitch.on) continue;
-    const n = new Notification(`${e.agent_kind || "agent"} 在等你处理`, { body: b.title, tag: `exec-${e.id}` });
+    const n = new Notification(t("{0} 在等你处理", [e.agent_kind || "agent"]), { body: b.title, tag: `exec-${e.id}` });
     n.onclick = () => { window.focus(); go(`#/e/${e.id}`); n.close(); };
   }
   for (const id of [...waitingSeen]) if (!waiting.some((w) => w.e.id === id)) waitingSeen.delete(id);
@@ -502,24 +503,24 @@ function renderNotify() {
   const state = Notification.permission;
   const ask = async () => {
     const answer = await Notification.requestPermission();
-    if (answer === "granted") { notifySwitch.on = true; toast("已开启通知：agent 等待输入时提醒你"); }
+    if (answer === "granted") { notifySwitch.on = true; toast(t("已开启通知：agent 等待输入时提醒你")); }
     renderNotify();
   };
   button.hidden = state !== "default";
   button.parentElement.hidden = button.hidden;
-  button.textContent = "🔔 开启通知：agent 等待输入时提醒";
+  button.textContent = t("🔔 开启通知：agent 等待输入时提醒");
   button.onclick = ask;
   bell.hidden = state === "default";
   const on = state === "granted" && notifySwitch.on;
   bell.textContent = on ? "🔔" : "🔕";
   bell.classList.toggle("off", !on);
   bell.setAttribute("aria-pressed", String(on));
-  bell.title = state === "denied" ? "浏览器禁止了这个页面的通知" : on ? "通知已开启，点一下关闭" : "通知已关闭，点一下打开";
+  bell.title = state === "denied" ? t("浏览器禁止了这个页面的通知") : on ? t("通知已开启，点一下关闭") : t("通知已关闭，点一下打开");
   bell.setAttribute("aria-label", bell.title);
   bell.onclick = () => {
-    if (state === "denied") return toast("浏览器禁止了这个页面的通知：在地址栏左边的网站设置里允许通知，再刷新页面", true);
+    if (state === "denied") return toast(t("浏览器禁止了这个页面的通知：在地址栏左边的网站设置里允许通知，再刷新页面"), true);
     notifySwitch.on = !notifySwitch.on;
-    toast(notifySwitch.on ? "已开启通知" : "已关闭通知");
+    toast(notifySwitch.on ? t("已开启通知") : t("已关闭通知"));
     renderNotify();
   };
 }
@@ -543,39 +544,39 @@ function newAgentPicker(onChange = () => {}) {
   let machineId = "local", kindId = config.kinds[0];
   let typeShape = "", machineShape = "", folderShape = "";
   const picks = [], directories = new Map(), typeButtons = new Map(), machineButtons = new Map();
-  const names = { claude: "Claude Code", codex: "Codex", pi: "Pi", omp: "OMP", opencode: "OpenCode", kimi: "Kimi", agy: "Antigravity", grok: "Grok", qwen: "Qwen", custom: "自定义命令" };
+  const names = { claude: "Claude Code", codex: "Codex", pi: "Pi", omp: "OMP", opencode: "OpenCode", kimi: "Kimi", agy: "Antigravity", grok: "Grok", qwen: "Qwen", custom: t("自定义命令") };
   const marks = { claude: ["✳", "#bb7255"], codex: ["›_", "#557c72"], pi: ["π", "#a87746"], omp: ["o", "#8571a5"], opencode: ["oc", "#627588"], kimi: ["K", "#587bb2"], agy: ["A", "#8c72b1"], grok: ["G", "#706c65"], qwen: ["Q", "#8071b7"], custom: [">_", "#847766"] };
   const nameOf = k => (config.capabilities || []).find(a => a.kind === k)?.name || names[k] || k;
-  const machines = () => (data.state?.machines || [{ id: "local", label: "本机", enabled: true }]).filter(m => m.enabled !== false);
+  const machines = () => (data.state?.machines || [{ id: "local", label: t("本机"), enabled: true }]).filter(m => m.enabled !== false);
   const machineName = id => machines().find(m => m.id === id)?.label || id;
-  const types = h("div", { class: "ap-types", role: "group", "aria-label": "Agent 类型" });
-  const machineBar = h("div", { class: "ap-machines", role: "group", "aria-label": "运行机器" });
-  const folders = h("div", { class: "ap-folders", "aria-label": "常用工作目录" });
-  const cwd = h("input", { class: "ap-path-input", placeholder: "输入工作目录，例如 ~/Code/my-project", "aria-label": "新 Agent 工作目录", autocomplete: "off", spellcheck: "false" });
+  const types = h("div", { class: "ap-types", role: "group", "aria-label": t("Agent 类型") });
+  const machineBar = h("div", { class: "ap-machines", role: "group", "aria-label": t("运行机器") });
+  const folders = h("div", { class: "ap-folders", "aria-label": t("常用工作目录") });
+  const cwd = h("input", { class: "ap-path-input", placeholder: t("输入工作目录，例如 ~/Code/my-project"), "aria-label": t("新 Agent 工作目录"), autocomplete: "off", spellcheck: "false" });
   const suggestions = h("div", { class: "dir-suggestions", hidden: true });
-  const count = h("input", { class: "ap-count-input", type: "number", min: "1", max: "20", value: "1", "aria-label": "新增 Agent 数量" });
-  const decrease = h("button", { type: "button", "aria-label": "减少新增数量", onclick: () => stepCount(-1) }, "−");
-  const increase = h("button", { type: "button", "aria-label": "增加新增数量", onclick: () => stepCount(1) }, "+");
-  const label = h("input", { placeholder: "给它起个名字（可选）", "aria-label": "自定义 Agent 名称", maxlength: "120" });
-  const command = h("input", { class: "ap-command-input", placeholder: "例如 my-agent --interactive", "aria-label": "自定义启动命令", autocomplete: "off", spellcheck: "false" });
+  const count = h("input", { class: "ap-count-input", type: "number", min: "1", max: "20", value: "1", "aria-label": t("新增 Agent 数量") });
+  const decrease = h("button", { type: "button", "aria-label": t("减少新增数量"), onclick: () => stepCount(-1) }, "−");
+  const increase = h("button", { type: "button", "aria-label": t("增加新增数量"), onclick: () => stepCount(1) }, "+");
+  const label = h("input", { placeholder: t("给它起个名字（可选）"), "aria-label": t("自定义 Agent 名称"), maxlength: "120" });
+  const command = h("input", { class: "ap-command-input", placeholder: t("例如 my-agent --interactive"), "aria-label": t("自定义启动命令"), autocomplete: "off", spellcheck: "false" });
   const custom = h("div", { class: "custom-launch", hidden: true },
     h("div", { class: "ap-custom-fields" }, label, command),
-    h("p", { class: "ap-note" }, "自定义命令不提供一键安装会话组件。请在目标机器准备好程序，启动后手动确认，恢复时手动选择历史。启动命令不保存到历史。"));
+    h("p", { class: "ap-note" }, t("自定义命令不提供一键安装会话组件。请在目标机器准备好程序，启动后手动确认，恢复时手动选择历史。启动命令不保存到历史。")));
   const chosen = h("div", { class: "ap-chosen", hidden: true });
   const chosenList = h("div", { class: "ap-chosen-list" });
   const chosenCount = h("span", { class: "ap-chosen-count" });
-  chosen.append(h("div", { class: "ap-heading" }, h("span", null, "本轮新增"), chosenCount), chosenList);
-  const add = h("button", { class: "btn ap-add", type: "button", onclick: () => addSpec(cwd.value) }, "添加 Agent");
+  chosen.append(h("div", { class: "ap-heading" }, h("span", null, t("本轮新增")), chosenCount), chosenList);
+  const add = h("button", { class: "btn ap-add", type: "button", onclick: () => addSpec(cwd.value) }, t("添加 Agent"));
 
   // Per-machine observations are reused across selection changes; scans never install anything.
   const environments = new Map(), checks = new Map(), observed = new Set(), statusNodes = new Map();
   const selectedInfo = h("div", { class: "ap-agent-context", role: "status" });
   const environmentNote = h("span", { class: "ap-environment-note" });
-  const componentSettings = h("button", { class: "ap-environment-action", type: "button", onclick: () => { void openSettings(kindId); } }, "会话组件");
-  const inspect = h("button", { class: "ap-environment-action ap-inspect", type: "button", onclick: () => loadEnvironment(machineId, true) }, "重新检查");
-  const manage = h("button", { class: "ap-environment-action", type: "button", onclick: () => { void openSettings(); } }, "管理全部 Agent");
+  const componentSettings = h("button", { class: "ap-environment-action", type: "button", onclick: () => { void openSettings(kindId); } }, t("会话组件"));
+  const inspect = h("button", { class: "ap-environment-action ap-inspect", type: "button", onclick: () => loadEnvironment(machineId, true) }, t("重新检查"));
+  const manage = h("button", { class: "ap-environment-action", type: "button", onclick: () => { void openSettings(); } }, t("管理全部 Agent"));
   function acceptEnvironment(id, value) {
-    if (!value || !Array.isArray(value.agents) || (value.machine && value.machine !== id)) throw new Error("没有收到这台机器的环境检查结果");
+    if (!value || !Array.isArray(value.agents) || (value.machine && value.machine !== id)) throw new Error(t("没有收到这台机器的环境检查结果"));
     const previous = environments.get(id);
     if (!previous || !value.checkedAt || !previous.checkedAt || value.checkedAt >= previous.checkedAt) environments.set(id, value);
   }
@@ -599,16 +600,16 @@ function newAgentPicker(onChange = () => {}) {
     return work;
   }
   function statusOf(k) {
-    if (k === "custom") return { text: "手动启动与恢复", tone: "manual" };
-    if (checks.has(machineId)) return { text: "检查中…", tone: "checking" };
+    if (k === "custom") return { text: t("手动启动与恢复"), tone: "manual" };
+    if (checks.has(machineId)) return { text: t("检查中…"), tone: "checking" };
     const snapshot = environments.get(machineId);
-    if (!snapshot) return { text: "待检查", tone: "checking" };
-    if (snapshot.error) return { text: "无法检查", tone: "unknown" };
+    if (!snapshot) return { text: t("待检查"), tone: "checking" };
+    if (snapshot.error) return { text: t("无法检查"), tone: "unknown" };
     const agent = snapshot.agents.find(a => a.kind === k);
-    if (!agent) return { text: "无法检查", tone: "unknown" };
-    if (!agent.cli) return { text: "未安装", tone: "missing", agent };
-    if (!agent.cliReady) return { text: "无法运行", tone: "missing", agent };
-    return { text: agent.ready ? "可用 · 自动识别会话" : "可用 · 手动恢复会话", tone: agent.ready ? "ready" : "manual", agent };
+    if (!agent) return { text: t("无法检查"), tone: "unknown" };
+    if (!agent.cli) return { text: t("未安装"), tone: "missing", agent };
+    if (!agent.cliReady) return { text: t("无法运行"), tone: "missing", agent };
+    return { text: agent.ready ? t("可用 · 自动识别会话") : t("可用 · 手动恢复会话"), tone: agent.ready ? "ready" : "manual", agent };
   }
   function openSettings(kind = null, addition = false) {
     const id = machineId;
@@ -624,19 +625,19 @@ function newAgentPicker(onChange = () => {}) {
     }
     const status = statusOf(kindId), current = environments.get(machineId);
     inspect.disabled = locked || adding || checks.has(machineId);
-    inspect.textContent = checks.has(machineId) ? "检查中…" : "重新检查";
+    inspect.textContent = checks.has(machineId) ? t("检查中…") : t("重新检查");
     manage.disabled = locked || adding;
-    environmentNote.textContent = checks.has(machineId) ? "正在检查程序…" : current?.error ? "检查失败，请重试" : "";
+    environmentNote.textContent = checks.has(machineId) ? t("正在检查程序…") : current?.error ? t("检查失败，请重试") : "";
     environmentNote.hidden = !environmentNote.textContent;
     componentSettings.hidden = kindId === "custom" || !status.agent?.cliReady || status.agent.ready;
     componentSettings.disabled = locked || adding;
-    componentSettings.textContent = `设置 ${nameOf(kindId)}`;
-    componentSettings.setAttribute("aria-label", `设置 ${nameOf(kindId)} 的会话组件`);
-    const message = status.tone === "unknown" ? `暂时无法检查 ${nameOf(kindId)}，请重新检查。`
-      : status.agent && !status.agent.cli ? `${machineName(machineId)} 尚未安装 ${nameOf(kindId)}。`
-      : status.agent && !status.agent.cliReady ? `${nameOf(kindId)} 暂时无法运行，请检查运行环境。` : "";
+    componentSettings.textContent = t("设置 {0}", [nameOf(kindId)]);
+    componentSettings.setAttribute("aria-label", t("设置 {0} 的会话组件", [nameOf(kindId)]));
+    const message = status.tone === "unknown" ? t("暂时无法检查 {0}，请重新检查。", [nameOf(kindId)])
+      : status.agent && !status.agent.cli ? t("{0} 尚未安装 {1}。", [machineName(machineId), nameOf(kindId)])
+      : status.agent && !status.agent.cliReady ? t("{0} 暂时无法运行，请检查运行环境。", [nameOf(kindId)]) : "";
     const action = status.agent && !status.agent.cliReady
-      ? h("button", { class: "ap-environment-action", type: "button", disabled: locked || adding, onclick: () => { void openSettings(kindId); } }, "查看安装步骤") : null;
+      ? h("button", { class: "ap-environment-action", type: "button", disabled: locked || adding, onclick: () => { void openSettings(kindId); } }, t("查看安装步骤")) : null;
     selectedInfo.hidden = !message;
     selectedInfo.replaceChildren(...[message ? h("p", null, message) : null, action].filter(Boolean));
     // Known missing programs stay inspectable, but cannot be added accidentally.
@@ -683,31 +684,31 @@ function newAgentPicker(onChange = () => {}) {
     if (shape === folderShape) return;
     folderShape = shape;
     folders.replaceChildren(...items.map(f => h("div", { class: "ap-folder" },
-      h("button", { class: `ap-folder-choice${cwd.value === f.path ? " selected" : ""}`, type: "button", title: f.path, "aria-label": `选择目录 ${f.path}`, "aria-pressed": String(cwd.value === f.path), onclick: () => chooseFolder(f.path) },
+      h("button", { class: `ap-folder-choice${cwd.value === f.path ? " selected" : ""}`, type: "button", title: f.path, "aria-label": t("选择目录 {0}", [f.path]), "aria-pressed": String(cwd.value === f.path), onclick: () => chooseFolder(f.path) },
         h("span", { class: "ap-folder-icon", "aria-hidden": "true" }, "↳"), h("span", { class: "ap-folder-name" }, f.name || baseName(f.path)), h("span", { class: "ap-folder-path" }, f.display || f.path)),
-      h("button", { class: "ap-folder-add", type: "button", "aria-label": `在 ${f.path} 添加 ${nameOf(kindId)}`, title: `添加 ${nameOf(kindId)}`, onclick: () => addSpec(f.path) }, "+"))));
+      h("button", { class: "ap-folder-add", type: "button", "aria-label": t("在 {0} 添加 {1}", [f.path, nameOf(kindId)]), title: t("添加 {0}", [nameOf(kindId)]), onclick: () => addSpec(f.path) }, "+"))));
     folders.hidden = !items.length; syncControls();
   }
   function renderChosen() {
     chosen.hidden = !picks.length;
-    chosenCount.textContent = `${picks.reduce((n, p) => n + p.count, 0)} 个 Agent`;
+    chosenCount.textContent = t("{0} 个 Agent", [picks.reduce((n, p) => n + p.count, 0)]);
     chosenList.replaceChildren(...picks.map((p, i) => h("div", { class: "ap-pick" },
       h("span", { class: "ap-pick-mark", "aria-hidden": "true" }, marks[p.kind]?.[0] || p.kind[0]),
       h("div", { class: "ap-pick-info" }, h("strong", null, p.label || nameOf(p.kind)), h("span", { title: p.cwd }, `${machineName(p.machine)} / ${p.cwd}`)),
       h("div", { class: "ap-stepper ap-pick-stepper" },
-        h("button", { type: "button", disabled: locked || p.count <= 1, "aria-label": `减少 ${p.label || nameOf(p.kind)}`, onclick: () => { if (!locked && p.count > 1) { p.count--; renderChosen(); } } }, "−"),
+        h("button", { type: "button", disabled: locked || p.count <= 1, "aria-label": t("减少 {0}", [p.label || nameOf(p.kind)]), onclick: () => { if (!locked && p.count > 1) { p.count--; renderChosen(); } } }, "−"),
         h("span", { class: "ap-pick-number" }, String(p.count)),
-        h("button", { type: "button", disabled: locked || p.count >= 20, "aria-label": `增加 ${p.label || nameOf(p.kind)}`, onclick: () => { if (!locked && p.count < 20) { p.count++; renderChosen(); } } }, "+")),
-      h("button", { class: "ap-pick-remove", type: "button", disabled: locked, "aria-label": "移除新增 Agent", onclick: () => { if (!locked) { picks.splice(i, 1); renderChosen(); } } }, "×"))));
+        h("button", { type: "button", disabled: locked || p.count >= 20, "aria-label": t("增加 {0}", [p.label || nameOf(p.kind)]), onclick: () => { if (!locked && p.count < 20) { p.count++; renderChosen(); } } }, "+")),
+      h("button", { class: "ap-pick-remove", type: "button", disabled: locked, "aria-label": t("移除新增 Agent"), onclick: () => { if (!locked) { picks.splice(i, 1); renderChosen(); } } }, "×"))));
     onChange();
   }
   async function addSpec(path) {
     if (locked || adding || disposed) return;
     const spec = { machine: machineId, kind: kindId, cwd: path.trim(), count: Number(count.value) };
-    if (!spec.cwd) { cwd.focus(); return toast("请先填写工作目录", true); }
-    if (!Number.isInteger(spec.count) || spec.count < 1 || spec.count > 20) { count.focus(); return toast("数量必须是 1 到 20 的整数", true); }
+    if (!spec.cwd) { cwd.focus(); return toast(t("请先填写工作目录"), true); }
+    if (!Number.isInteger(spec.count) || spec.count < 1 || spec.count > 20) { count.focus(); return toast(t("数量必须是 1 到 20 的整数"), true); }
     if (spec.kind === "custom") {
-      if (!command.value.trim() || /[\x00\r\n]/.test(command.value)) { command.focus(); return toast("请填写单行启动命令", true); }
+      if (!command.value.trim() || /[\x00\r\n]/.test(command.value)) { command.focus(); return toast(t("请填写单行启动命令"), true); }
       spec.command = command.value; if (label.value.trim()) spec.label = label.value.trim();
     }
     adding = true; syncControls();
@@ -715,28 +716,28 @@ function newAgentPicker(onChange = () => {}) {
       if (spec.kind !== "custom") {
         const environment = await loadEnvironment(spec.machine, true);
         if (disposed || locked) return;
-        if (environment.error) return toast("无法确认程序是否可用，请重新检查", true);
+        if (environment.error) return toast(t("无法确认程序是否可用，请重新检查"), true);
         const agent = environment.agents.find(a => a.kind === spec.kind);
         if (!agent?.cliReady) { openSettings(spec.kind); return; }
         if (!agent.ready && !await openSettings(spec.kind, true)) return;
       }
       if (disposed || locked) return;
       const same = picks.find(p => p.machine === spec.machine && p.kind === spec.kind && p.cwd === spec.cwd && p.command === spec.command && p.label === spec.label);
-      if (same && same.count + spec.count > 20) return toast("同一组最多添加 20 个 Agent", true);
+      if (same && same.count + spec.count > 20) return toast(t("同一组最多添加 20 个 Agent"), true);
       if (same) same.count += spec.count; else picks.push(spec);
       command.value = ""; renderChosen();
     } catch (error) { if (!disposed) toast(error.message, true); }
     finally { adding = false; syncControls(); }
   }
   const stepTitle = (number, title) => h("span", { class: "ap-step-title" }, h("span", { class: "ap-step-number", "aria-hidden": "true" }, number), title);
-  const el = h("section", { class: "new-agent-picker", "aria-label": "新增 Agent", onkeydown: event => { if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault(); } },
-    h("div", { class: "ap-target" }, h("div", { class: "ap-heading" }, stepTitle("1", "运行机器"), h("div", { class: "ap-environment-actions" }, inspect, manage)), machineBar, environmentNote),
-    h("div", { class: "ap-heading" }, stepTitle("2", "选择 Agent"), componentSettings), types, selectedInfo, custom,
-    h("div", { class: "ap-destination" }, h("div", { class: "ap-heading" }, stepTitle("3", "设置启动位置与数量")), folders,
+  const el = h("section", { class: "new-agent-picker", "aria-label": t("新增 Agent"), onkeydown: event => { if (event.key === "Enter" && event.target.tagName === "INPUT") event.preventDefault(); } },
+    h("div", { class: "ap-target" }, h("div", { class: "ap-heading" }, stepTitle("1", t("运行机器")), h("div", { class: "ap-environment-actions" }, inspect, manage)), machineBar, environmentNote),
+    h("div", { class: "ap-heading" }, stepTitle("2", t("选择 Agent")), componentSettings), types, selectedInfo, custom,
+    h("div", { class: "ap-destination" }, h("div", { class: "ap-heading" }, stepTitle("3", t("设置启动位置与数量"))), folders,
       h("div", { class: "ap-launch-fields" },
-        h("div", { class: "ap-directory-field" }, h("label", { class: "ap-field-label" }, "工作目录", cwd), suggestions),
-        h("div", { class: "ap-quantity-field" }, h("span", { class: "ap-field-label" }, "数量"),
-          h("div", { class: "ap-stepper", "aria-label": "本次添加数量" }, decrease, count, increase)), add)), chosen);
+        h("div", { class: "ap-directory-field" }, h("label", { class: "ap-field-label" }, t("工作目录"), cwd), suggestions),
+        h("div", { class: "ap-quantity-field" }, h("span", { class: "ap-field-label" }, t("数量")),
+          h("div", { class: "ap-stepper", "aria-label": t("本次添加数量") }, decrease, count, increase)), add)), chosen);
   function refresh() {
     for (const snapshot of data.environments || []) { if (snapshot.machine) acceptEnvironment(snapshot.machine, snapshot); }
     const catalog = [...config.kinds, "custom"];
@@ -746,7 +747,7 @@ function newAgentPicker(onChange = () => {}) {
       typeShape = nextTypes; typeButtons.clear(); statusNodes.clear();
       types.replaceChildren(...catalog.map(k => {
         const status = h("span", { class: "ap-type-status" }); statusNodes.set(k, status);
-        const button = h("button", { class: "ap-type", type: "button", "aria-label": k === "custom" ? "选择自定义命令" : `选择 ${nameOf(k)}`, onclick: () => { if (locked || adding) return; kindId = k; syncControls(); renderFolders(); } },
+        const button = h("button", { class: "ap-type", type: "button", "aria-label": k === "custom" ? t("选择自定义命令") : t("选择 {0}", [nameOf(k)]), onclick: () => { if (locked || adding) return; kindId = k; syncControls(); renderFolders(); } },
           h("span", { class: "ap-type-mark", style: `--agent-color:${marks[k]?.[1] || "#777"}`, "aria-hidden": "true" }, marks[k]?.[0] || k[0]), h("span", { class: "ap-type-copy" }, h("span", null, nameOf(k)), status));
         typeButtons.set(k, button); return button;
       }));
@@ -757,7 +758,7 @@ function newAgentPicker(onChange = () => {}) {
     if (nextMachines !== machineShape) {
       machineShape = nextMachines; machineButtons.clear();
       machineBar.replaceChildren(...available.map(m => {
-        const button = h("button", { class: "ap-machine", type: "button", "aria-label": `选择机器 ${m.label}`, onclick: () => {
+        const button = h("button", { class: "ap-machine", type: "button", "aria-label": t("选择机器 {0}", [m.label]), onclick: () => {
           if (locked || adding || machineId === m.id) return;
           directories.set(machineId, cwd.value); machineId = m.id; cwd.value = directories.get(m.id) || "";
           hideSuggestions(); syncControls(); renderFolders(); observed.add(machineId); void loadEnvironment(machineId, true);
@@ -781,8 +782,8 @@ function newView(main) {
   const prefill = takePrefill();
   const draft = prefill || loadDraft();
   let picker;
-  const title = h("input", { class: "title-input", value: draft.title || "", placeholder: "标题（默认取输入第一行）", "aria-label": "广播标题", oninput: () => saveDraft() });
-  const prompt = h("textarea", { class: "prompt", rows: "4", "aria-label": "广播内容", placeholder: "要广播什么？", oninput: () => { saveDraft(); updateComposer(); }, onkeydown: e => {
+  const title = h("input", { class: "title-input", value: draft.title || "", placeholder: t("标题（默认取输入第一行）"), "aria-label": t("广播标题"), oninput: () => saveDraft() });
+  const prompt = h("textarea", { class: "prompt", rows: "4", "aria-label": t("广播内容"), placeholder: t("要广播什么？"), oninput: () => { saveDraft(); updateComposer(); }, onkeydown: e => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); void submit(); }
   } });
   prompt.value = draft.prompt || "";
@@ -793,7 +794,7 @@ function newView(main) {
   function saveDraft() { localStorage.setItem(DRAFT_KEY, JSON.stringify({ title: title.value, prompt: prompt.value })); }
   function updateComposer() {
     send.disabled = submitting || !picker?.count() || !prompt.value.trim();
-    hint.textContent = picker?.count() ? `新建 ${picker.count()} 个 Agent · Enter 发送，Shift+Enter 换行` : "添加要新建的 Agent";
+    hint.textContent = picker?.count() ? t("新建 {0} 个 Agent · Enter 发送，Shift+Enter 换行", [picker.count()]) : t("添加要新建的 Agent");
   }
   async function submit() {
     if (submitting || disposed || !picker.count() || !prompt.value.trim()) return;
@@ -807,8 +808,8 @@ function newView(main) {
     } catch (error) { if (!disposed) toast(error.message, true); }
     finally { submitting = false; if (!disposed) { prompt.disabled = title.disabled = false; picker.lock(false); updateComposer(); } }
   }
-  main.append(topbar(h("span", { class: "title" }, "新建广播")), h("div", { class: "scroll new-scroll" }, h("div", { class: "column new-column" },
-    h("div", { class: "new-hero" }, h("h1", { class: "hero" }, "要广播什么？"), h("p", { class: "hero-sub" }, "一个任务，多轮协作。新建 Agent 开始第一轮。")),
+  main.append(topbar(h("span", { class: "title" }, t("新建广播"))), h("div", { class: "scroll new-scroll" }, h("div", { class: "column new-column" },
+    h("div", { class: "new-hero" }, h("h1", { class: "hero" }, t("要广播什么？")), h("p", { class: "hero-sub" }, t("一个任务，多轮协作。新建 Agent 开始第一轮。"))),
     h("div", { class: "composer" }, title, prompt, h("div", { class: "composer-foot" }, hint, send)), picker.el)));
   updateComposer(); prompt.focus();
   return { update() { picker.refresh(); updateComposer(); }, dispose() { disposed = true; picker.dispose(); } };
@@ -818,7 +819,16 @@ function newView(main) {
 // ---- settings: one home for plugin updates and the web service ---------------------------
 
 function settingsView(main) {
-  const about = h("section", { class: "about", "aria-label": "插件版本" });
+  const language = h("div", { class: "language-choices", role: "group", "aria-label": t("界面语言") },
+    ...[["zh-CN", "简体中文"], ["en", "English"]].map(([code, name]) => h("button", {
+      class: `btn${BroadcastI18n.language === code ? " primary" : ""}`, type: "button", lang: code,
+      "aria-pressed": String(BroadcastI18n.language === code), onclick: () => {
+        if (BroadcastI18n.language === code) return;
+        if (!BroadcastI18n.setLanguage(code)) return toast(t("无法保存语言偏好，请检查浏览器的存储权限。"), true);
+        location.reload();
+      },
+    }, name)));
+  const about = h("section", { class: "about", "aria-label": t("插件版本") });
   const restart = h("button", { class: "btn", type: "button", disabled: !config.local, onclick: async () => {
     restart.disabled = true;
     try {
@@ -827,19 +837,22 @@ function settingsView(main) {
       if (result.operationId) watchUpdateOperation(result.operationId, result.instance);
       else waitForRestart(result.instance);
     } catch (error) { toast(error.message, true); restart.disabled = false; }
-  } }, "重启服务");
-  main.append(topbar(h("span", { class: "title" }, "设置")),
+  } }, t("重启服务"));
+  main.append(topbar(h("span", { class: "title" }, t("设置"))),
     h("div", { class: "scroll" }, h("div", { class: "column settings-column" },
-      h("h1", { class: "settings-title" }, "设置"),
-      h("p", { class: "sub" }, "管理广播插件的版本和网页服务。"),
-      h("h2", { class: "settings-heading" }, "插件版本"), about,
-      h("h2", { class: "settings-heading" }, "网页服务"),
+      h("h1", { class: "settings-title" }, t("设置")),
+      h("p", { class: "sub" }, t("管理广播插件的版本和网页服务。")),
+      h("h2", { class: "settings-heading" }, t("语言")),
+      h("section", { class: "language-panel" }, language,
+        h("p", { class: "sub" }, t("跟随浏览器语言，或选择此浏览器使用的语言。切换后会刷新页面。"))),
+      h("h2", { class: "settings-heading" }, t("插件版本")), about,
+      h("h2", { class: "settings-heading" }, t("网页服务")),
       h("section", { class: "service-panel" },
-        h("div", null, h("strong", null, "重启广播服务"),
-          h("p", { class: "sub" }, "使用当前运行版本重启。页面会自动恢复连接，agent 的任务继续执行。")), restart),
-      !config.local ? h("p", { class: "sub" }, "检查、更新和重启请在运行广播服务的电脑上操作。") : null,
-      h("details", { class: "service-help" }, h("summary", null, "网页打不开时如何重启？"),
-        h("p", null, "在 Herdr 的动作菜单中选择「Broadcast: 重启服务」，或在服务所在电脑的终端运行："),
+        h("div", null, h("strong", null, t("重启广播服务")),
+          h("p", { class: "sub" }, t("使用当前运行版本重启。页面会自动恢复连接，agent 的任务继续执行。"))), restart),
+      !config.local ? h("p", { class: "sub" }, t("检查、更新和重启请在运行广播服务的电脑上操作。")) : null,
+      h("details", { class: "service-help" }, h("summary", null, t("网页打不开时如何重启？")),
+        h("p", null, t("在 Herdr 的动作菜单中选择「Broadcast: 重启服务」，或在服务所在电脑的终端运行：")),
         h("code", null, `herdr plugin action invoke ${config.pluginId || "herdr-broadcast"}.web-restart`)))));
   /** the plugin's own version, and updating it */
   let checkingUpdate = false;
@@ -848,29 +861,29 @@ function settingsView(main) {
     const shape = JSON.stringify([u, checkingUpdate, updateInstalling, config.local]);
     if (about.dataset.shape === shape) return;
     about.dataset.shape = shape;
-    if (!u) { about.replaceChildren(h("span", null, "Broadcast 插件"), h("span", { class: "about-state" }, "正在读取版本…")); return; }
+    if (!u) { about.replaceChildren(h("span", null, t("Broadcast 插件")), h("span", { class: "about-state" }, t("正在读取版本…"))); return; }
     const line = updateLine(u);
-    const state = u.phase === "checking" || checkingUpdate ? ["", "正在检查更新…"]
+    const state = u.phase === "checking" || checkingUpdate ? ["", t("正在检查更新…")]
       : ["updating", "restarting"].includes(u.phase) ? ["", line]
       : u.phase === "error" ? ["bad", line]
       : !canUpdatePlugin(u) ? ["", ""]
       : u.available ? ["new", u.blocked_reason ? `${line}：${u.blocked_reason}` : line]
       : u.blocked_reason ? ["", u.blocked_reason]
-      : u.checked_at ? ["", `暂无可升级的正式版本（${ago(u.checked_at)}检查）`] : ["", "还没有检查过更新"];
+      : u.checked_at ? ["", t("暂无可升级的正式版本（{0}检查）", [ago(u.checked_at)])] : ["", t("还没有检查过更新")];
     const busy = checkingUpdate || updateInstalling || ["checking", "updating", "restarting"].includes(u.phase);
     restart.disabled = busy || !config.local;
-    const where = !config.local ? "在这台电脑本机的浏览器里打开本页即可检查和更新" : null;
+    const where = !config.local ? t("在这台电脑本机的浏览器里打开本页即可检查和更新") : null;
     const check = canUpdatePlugin(u) ? h("button", { class: "btn quiet", type: "button", disabled: busy || !config.local, title: where, onclick: async () => {
       checkingUpdate = true; renderAbout();
       try { data.update = (await post("/api/update/check")).update; } catch (error) { toast(error.message, true); }
       finally { checkingUpdate = false; renderAbout(); renderUpdate(); }
-    } }, "检查更新") : null;
+    } }, t("检查更新")) : null;
     const install = canUpdatePlugin(u) && u.available && !u.blocked_reason && config.local
-      ? confirmButton("更新并重启", "再点一次：更新并重启网页", installUpdate, { class: "btn primary", disabled: busy })
+      ? confirmButton(t("更新并重启"), t("再点一次：更新并重启网页"), installUpdate, { class: "btn primary", disabled: busy })
       : null;
     // replaceChildren keeps no `null`, as `h()` does: absent children are left out, not printed
-    about.replaceChildren(...[h("span", null, "Broadcast 运行版本"), h("span", { class: "about-version" }, versionText(u.current_version, u.current_revision)),
-      canUpdatePlugin(u) && u.source_revision && u.source_revision !== u.current_revision ? h("span", { class: "sub" }, `已安装版本：${versionText(u.source_version, u.source_revision)}`) : null,
+    about.replaceChildren(...[h("span", null, t("Broadcast 运行版本")), h("span", { class: "about-version" }, versionText(u.current_version, u.current_revision)),
+      canUpdatePlugin(u) && u.source_revision && u.source_revision !== u.current_revision ? h("span", { class: "sub" }, t("已安装版本：{0}", [versionText(u.source_version, u.source_revision)])) : null,
       state[1] ? h("span", { class: `about-state${state[0] ? ` ${state[0]}` : ""}`, title: u.error || u.blocked_reason || null }, state[1]) : null,
       h("span", { class: "spacer" }), check, install].filter(Boolean));
   }
@@ -887,7 +900,7 @@ function showAgentPreparation(machine, initial = null, options = {}) {
   let acceptAddition = false, finish;
   const result = new Promise(resolve => { finish = resolve; });
   const scopeName = initial?.agents?.find(a => a.kind === scopeKind)?.name || (config.capabilities || []).find(a => a.kind === scopeKind)?.name || scopeKind;
-  const dialog = h("dialog", { class: `agent-preparation${addition ? " prep-addition" : !scopeKind ? " prep-manager" : ""}`, "aria-label": `${addition ? `添加 ${scopeName}` : scopeKind ? `设置 ${scopeName}` : "准备 Agent"} · ${machine.label}` });
+  const dialog = h("dialog", { class: `agent-preparation${addition ? " prep-addition" : !scopeKind ? " prep-manager" : ""}`, "aria-label": `${addition ? t("添加 {0}", [scopeName]) : scopeKind ? t("设置 {0}", [scopeName]) : t("准备 Agent")} · ${machine.label}` });
   const content = h("div", { class: "prep-content" });
   const footer = h("footer", { class: "prep-footer" });
   let snapshot = initial, operation = (data.environmentOperations || []).filter(o => o.machine === machine.id).at(-1);
@@ -919,13 +932,13 @@ function showAgentPreparation(machine, initial = null, options = {}) {
     catch (error) { if (!closed) toast(error.message, true); }
     finally { busy = false; if (!closed) { render(); void poll(); } }
   };
-  const recheck = h("button", { class: "btn prep-recheck", type: "button", onclick: check }, "重新检查");
+  const recheck = h("button", { class: "btn prep-recheck", type: "button", onclick: check }, t("重新检查"));
   function syncFooter() {
     const running = operation?.state === "running";
-    const hint = !config.local ? "请在运行广播服务的电脑上安装组件。" : running ? "关闭窗口后，安装会在后台继续。"
-      : busy ? "正在检查，请稍候…" : selected.size ? `将在 ${machine.label} 为 ${selected.size} 个 Agent 安装或更新会话组件。`
-      : visibleAgents().some(installable) ? `选择要在 ${machine.label} 安装或更新的会话组件。`
-      : scopeKind && !visibleAgents().some(a => a.cliReady) ? "请先按指引准备好程序，再重新检查。" : `${machine.label} · 会话组件按机器独立配置`;
+    const hint = !config.local ? t("请在运行广播服务的电脑上安装组件。") : running ? t("关闭窗口后，安装会在后台继续。")
+      : busy ? t("正在检查，请稍候…") : selected.size ? t("将在 {0} 为 {1} 个 Agent 安装或更新会话组件。", [machine.label, selected.size])
+      : visibleAgents().some(installable) ? t("选择要在 {0} 安装或更新的会话组件。", [machine.label])
+      : scopeKind && !visibleAgents().some(a => a.cliReady) ? t("请先按指引准备好程序，再重新检查。") : t("{0} · 会话组件按机器独立配置", [machine.label]);
     if (addition) {
       const agent = visibleAgents()[0];
       const canContinue = !busy && !running && !snapshot?.error && !!agent?.cliReady;
@@ -933,37 +946,37 @@ function showAgentPreparation(machine, initial = null, options = {}) {
       footer.replaceChildren(...[
         !config.local || running || busy ? h("p", { class: "prep-footer-hint", role: "status" }, hint) : null,
         h("div", { class: "prep-footer-actions" },
-          h("button", { class: `btn${agent?.ready ? " primary" : ""}`, type: "button", disabled: !canContinue, onclick: proceed }, agent?.ready ? "添加 Agent" : "暂不安装，继续添加"),
-          !agent?.ready ? h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, agent?.integrationState === "outdated" ? "更新会话组件" : "安装会话组件") : null),
+          h("button", { class: `btn${agent?.ready ? " primary" : ""}`, type: "button", disabled: !canContinue, onclick: proceed }, agent?.ready ? t("添加 Agent") : t("暂不安装，继续添加")),
+          !agent?.ready ? h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, agent?.integrationState === "outdated" ? t("更新会话组件") : t("安装会话组件")) : null),
       ].filter(Boolean));
     } else footer.replaceChildren(h("p", { class: "prep-footer-hint", role: "status" }, hint),
       h("div", { class: "prep-footer-actions" },
-        h("button", { class: "btn", type: "button", onclick: close }, running ? "关闭，后台继续" : "关闭"),
-        ...(visibleAgents().some(installable) || running ? [h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, selected.size ? `安装所选组件（${selected.size}）` : "安装所选组件")] : [])));
+        h("button", { class: "btn", type: "button", onclick: close }, running ? t("关闭，后台继续") : t("关闭")),
+        ...(visibleAgents().some(installable) || running ? [h("button", { class: "btn primary", type: "button", disabled: busy || running || !selected.size || !config.local, onclick: prepare }, selected.size ? t("安装所选组件（{0}）", [selected.size]) : t("安装所选组件"))] : [])));
     recheck.disabled = busy || running;
-    recheck.textContent = busy ? "检查中…" : "重新检查";
+    recheck.textContent = busy ? t("检查中…") : t("重新检查");
   }
   function agentRow(a, mode) {
     const pending = mode === "installable";
-    const state = pending ? a.integrationState === "outdated" ? "组件待更新" : "组件待安装"
-      : a.ready ? "已就绪" : !a.cli ? "未安装程序" : !a.cliReady ? "程序需处理" : !a.configReady ? "需要初始化" : "需要检查";
-    const hint = pending ? a.integrationState === "outdated" ? "程序可用，可按需更新会话识别组件。" : "程序可用。配置会话识别可帮助找回原对话；未配置也能发送广播。"
-      : a.ready ? "程序可用，会话识别已配置，无需重复设置。"
-      : !a.cli ? `先在这台机器安装 ${a.name}，然后重新检查。`
-      : !a.cliReady ? (a.reason || "程序无法运行，请检查安装和运行环境。").replace(/\bCLI\b/g, "程序")
-      : !a.configReady ? `先在这台机器启动一次 ${a.name}，完成初始化后重新检查。`
-      : "无法确认会话组件状态，请重新检查 Herdr 版本与配置。";
+    const state = pending ? a.integrationState === "outdated" ? t("组件待更新") : t("组件待安装")
+      : a.ready ? t("已就绪") : !a.cli ? t("未安装程序") : !a.cliReady ? t("程序需处理") : !a.configReady ? t("需要初始化") : t("需要检查");
+    const hint = pending ? a.integrationState === "outdated" ? t("程序可用，可按需更新会话识别组件。") : t("程序可用。配置会话识别可帮助找回原对话；未配置也能发送广播。")
+      : a.ready ? t("程序可用，会话识别已配置，无需重复设置。")
+      : !a.cli ? t("先在这台机器安装 {0}，然后重新检查。", [a.name])
+      : !a.cliReady ? (a.reason || t("程序无法运行，请检查安装和运行环境。")).replace(/\bCLI\b/g, t("程序"))
+      : !a.configReady ? t("先在这台机器启动一次 {0}，完成初始化后重新检查。", [a.name])
+      : t("无法确认会话组件状态，请重新检查 Herdr 版本与配置。");
     const name = h("strong", null, a.name);
     const identity = pending ? h("label", { class: "prep-agent-choice" },
-      h("input", { type: "checkbox", "aria-label": `选择 ${a.name}`, checked: selected.has(a.integration), disabled: busy || operation?.state === "running" || !config.local,
+      h("input", { type: "checkbox", "aria-label": t("选择 {0}", [a.name]), checked: selected.has(a.integration), disabled: busy || operation?.state === "running" || !config.local,
         onchange: event => { if (event.target.checked) selected.add(a.integration); else selected.delete(a.integration); syncFooter(); } }), name) : name;
     return h("article", { class: `prep-agent ${pending ? "actionable" : a.ready ? "ready" : "prerequisite"}` },
       h("div", { class: "prep-agent-top" }, identity, h("span", { class: `prep-badge ${pending ? "pending" : a.ready ? "ready" : "muted"}` }, state)),
       scopeKind || mode === "prerequisite" ? h("p", { class: "prep-agent-hint" }, hint) : null,
-      mode === "prerequisite" ? h("a", { class: "prep-guide-link", href: a.guide, target: "_blank", rel: "noopener noreferrer" }, !a.cli ? `安装 ${a.name} ↗` : "查看设置指引 ↗") : null,
-      a.configDir || a.version ? h("details", { class: "prep-agent-details" }, h("summary", { "aria-label": `查看 ${a.name} 的版本与配置` }, !scopeKind && a.version ? `${a.version} · 版本与配置` : "版本与配置"),
-        a.version ? h("div", null, h("span", null, "程序版本"), h("code", null, a.version)) : null,
-        a.configDir ? h("div", null, h("span", null, "配置目录"), h("code", null, a.configDir)) : null) : null);
+      mode === "prerequisite" ? h("a", { class: "prep-guide-link", href: a.guide, target: "_blank", rel: "noopener noreferrer" }, !a.cli ? t("安装 {0} ↗", [a.name]) : t("查看设置指引 ↗")) : null,
+      a.configDir || a.version ? h("details", { class: "prep-agent-details" }, h("summary", { "aria-label": t("查看 {0} 的版本与配置", [a.name]) }, !scopeKind && a.version ? t("{0} · 版本与配置", [a.version]) : t("版本与配置")),
+        a.version ? h("div", null, h("span", null, t("程序版本")), h("code", null, a.version)) : null,
+        a.configDir ? h("div", null, h("span", null, t("配置目录")), h("code", null, a.configDir)) : null) : null);
   }
   function render() {
     const agents = visibleAgents();
@@ -973,54 +986,54 @@ function showAgentPreparation(machine, initial = null, options = {}) {
     }
     for (const name of selected) if (!actionable.some(a => a.integration === name)) selected.delete(name);
     content.replaceChildren();
-    if (snapshot?.error) content.append(h("div", { class: "prep-error", role: "alert" }, h("strong", null, "检查失败"), h("p", null, snapshot.error), h("p", null, "请确认机器连接正常，再点击右上角重新检查。")));
-    else if (!snapshot) content.append(h("p", { class: "prep-loading", role: "status" }, "正在检查这台机器上的 Agent…"));
+    if (snapshot?.error) content.append(h("div", { class: "prep-error", role: "alert" }, h("strong", null, t("检查失败")), h("p", null, snapshot.error), h("p", null, t("请确认机器连接正常，再点击右上角重新检查。"))));
+    else if (!snapshot) content.append(h("p", { class: "prep-loading", role: "status" }, t("正在检查这台机器上的 Agent…")));
     else {
       if (addition) content.append(h("div", { class: "prep-add-benefits" },
-        h("p", null, ready.length ? "会话组件已就绪，可以添加 Agent。" : "不安装也能添加；之后恢复原对话时，需要手动选择历史。"),
-        h("p", { class: "prep-add-alternative" }, "仅安装 Herdr 会话组件，不安装 Agent 程序、依赖或模型账号。")));
-      if (actionable.length && !addition) content.append(h("section", { class: "prep-installable" }, h("div", { class: "prep-section-heading" }, h("h3", null, scopeKind ? "配置会话识别" : `可安装或更新 · ${actionable.length}`),
+        h("p", null, ready.length ? t("会话组件已就绪，可以添加 Agent。") : t("不安装也能添加；之后恢复原对话时，需要手动选择历史。")),
+        h("p", { class: "prep-add-alternative" }, t("仅安装 Herdr 会话组件，不安装 Agent 程序、依赖或模型账号。"))));
+      if (actionable.length && !addition) content.append(h("section", { class: "prep-installable" }, h("div", { class: "prep-section-heading" }, h("h3", null, scopeKind ? t("配置会话识别") : t("可安装或更新 · {0}", [actionable.length])),
         !scopeKind ? h("button", { class: "ap-environment-action", type: "button", disabled: busy || operation?.state === "running" || !config.local, onclick: () => {
           const all = actionable.every(a => selected.has(a.integration));
           for (const a of actionable) { if (all) selected.delete(a.integration); else selected.add(a.integration); } render();
-        } }, actionable.every(a => selected.has(a.integration)) ? "取消全选" : "全选可配置项") : null), h("div", { class: "prep-list" }, actionable.map(a => agentRow(a, "installable")))));
+        } }, actionable.every(a => selected.has(a.integration)) ? t("取消全选") : t("全选可配置项")) : null), h("div", { class: "prep-list" }, actionable.map(a => agentRow(a, "installable")))));
       if (ready.length && !addition) content.append(scopeKind
-        ? h("section", { class: "prep-ready" }, h("div", { class: "prep-section-heading" }, h("h3", null, "已就绪"), h("span", null, "无需操作")), ready.map(a => agentRow(a, "ready")))
+        ? h("section", { class: "prep-ready" }, h("div", { class: "prep-section-heading" }, h("h3", null, t("已就绪")), h("span", null, t("无需操作"))), ready.map(a => agentRow(a, "ready")))
         : h("details", { class: "prep-ready prep-group", open: readyOpen, ontoggle: event => { readyOpen = event.target.open; } },
-          h("summary", null, h("strong", null, `已就绪 · ${ready.length}`), h("span", null, "无需重复安装")), h("div", { class: "prep-list" }, ready.map(a => agentRow(a, "ready")))));
+          h("summary", null, h("strong", null, t("已就绪 · {0}", [ready.length])), h("span", null, t("无需重复安装"))), h("div", { class: "prep-list" }, ready.map(a => agentRow(a, "ready")))));
       if (prerequisites.length) content.append(h("details", { class: "prep-prerequisites prep-group", open: prerequisitesOpen, ontoggle: event => { prerequisitesOpen = event.target.open; } },
-        h("summary", null, h("strong", null, `需先处理 · ${prerequisites.length}`), h("span", null, "先安装程序或完成初始化")), h("div", { class: "prep-list" }, prerequisites.map(a => agentRow(a, "prerequisite")))));
-      if (!agents.length) content.append(h("p", { class: "prep-loading" }, "暂无检查结果，请重新检查。"));
+        h("summary", null, h("strong", null, t("需先处理 · {0}", [prerequisites.length])), h("span", null, t("先安装程序或完成初始化"))), h("div", { class: "prep-list" }, prerequisites.map(a => agentRow(a, "prerequisite")))));
+      if (!agents.length) content.append(h("p", { class: "prep-loading" }, t("暂无检查结果，请重新检查。")));
     }
     if (addition && (snapshot?.error || agents.some(a => !a.ready && !installable(a)))) content.append(recheck);
-    if (!scopeKind) content.append(h("details", { class: "prep-custom-note" }, h("summary", null, "自定义命令如何配置？"),
-      h("p", null, "自定义命令不提供一键安装会话组件；请自行准备程序，启动后手动确认，恢复时手动选择历史。")));
+    if (!scopeKind) content.append(h("details", { class: "prep-custom-note" }, h("summary", null, t("自定义命令如何配置？")),
+      h("p", null, t("自定义命令不提供一键安装会话组件；请自行准备程序，启动后手动确认，恢复时手动选择历史。"))));
     const items = (operation?.items || []).filter(i => (!scopeKind || agents.some(a => a.integration === i.integration))
       && (operation.state === "running" || i.state !== "ready"));
     if (operation && operation.state !== "done" && (operation.state === "running" || items.length)) {
-      const labels = { pending: "等待安装", checking: "检查中", installing: "安装中", ready: "已完成", failed: "安装失败", cancelled: "已取消" };
-      const title = { running: "正在安装会话组件", failed: "部分组件安装失败", cancelled: "安装已取消", interrupted: "上次安装中断，请重新检查" }[operation.state] || "安装进度";
+      const labels = { pending: t("等待安装"), checking: t("检查中"), installing: t("安装中"), ready: t("已完成"), failed: t("安装失败"), cancelled: t("已取消") };
+      const title = { running: t("正在安装会话组件"), failed: t("部分组件安装失败"), cancelled: t("安装已取消"), interrupted: t("上次安装中断，请重新检查") }[operation.state] || t("安装进度");
       content.prepend(h("section", { class: "environment-progress", role: "status" },
-        h("strong", null, items.length ? `${machine.label} · ${title}` : "这台机器正在处理其他 Agent，请在全部管理中查看进度。"),
+        h("strong", null, items.length ? `${machine.label} · ${title}` : t("这台机器正在处理其他 Agent，请在全部管理中查看进度。")),
         items.map(i => h("div", { class: "prep-progress-item" }, h("span", null, agents.find(a => a.integration === i.integration)?.name || i.integration), h("span", null, labels[i.state] || i.state), i.reason ? h("p", null, i.reason) : null)),
-        pollError ? h("p", { class: "prep-error", role: "alert" }, `暂时无法获取进度：${pollError}`, h("button", { class: "btn", type: "button", onclick: poll }, "重试获取进度")) : null,
+        pollError ? h("p", { class: "prep-error", role: "alert" }, t("暂时无法获取进度：{0}", [pollError]), h("button", { class: "btn", type: "button", onclick: poll }, t("重试获取进度"))) : null,
         operation.state === "running" && (!scopeKind || items.length) ? h("button", { class: "btn", type: "button", disabled: busy || !config.local, onclick: async () => {
           busy = true; render();
           try { await api(`/api/environment-operations/${operation.id}`, { method: "DELETE" }); }
           catch (error) { if (!closed) toast(error.message, true); }
           finally { busy = false; if (!closed) render(); }
-        } }, "取消安装") : null));
+        } }, t("取消安装")) : null));
     }
     syncFooter();
   }
   dialog.append(h("header", { class: "prep-header" },
-    h("div", { class: "prep-title-row" }, h("div", { class: "prep-title" }, h("span", { class: "prep-machine" }, "会话组件 · 按机器配置"),
-      h("h2", null, scopeKind ? `${machine.label} · ${scopeName}` : `${machine.label} 的 Agent 组件`),
+    h("div", { class: "prep-title-row" }, h("div", { class: "prep-title" }, h("span", { class: "prep-machine" }, t("会话组件 · 按机器配置")),
+      h("h2", null, scopeKind ? `${machine.label} · ${scopeName}` : t("{0} 的 Agent 组件", [machine.label])),
       machine.target ? h("code", { class: "prep-machine-address" }, machine.target) : null),
-      h("button", { class: "prep-close", type: "button", "aria-label": "关闭准备 Agent", onclick: close }, "×")),
-    h("div", { class: "prep-toolbar" }, h("p", { class: "prep-intro" }, addition ? `组件将安装在 ${machine.label}，用于自动识别会话、找回原对话。`
-      : "每台机器独立配置，组件用于自动识别并找回原对话。"), !addition ? recheck : null),
-    scopeKind && !addition ? h("button", { class: "ap-environment-action prep-show-all", type: "button", onclick: () => { close(); showAgentPreparation(machine, snapshot, { onUpdate: options.onUpdate }); } }, "查看全部 Agent") : null), content, footer);
+      h("button", { class: "prep-close", type: "button", "aria-label": t("关闭准备 Agent"), onclick: close }, "×")),
+    h("div", { class: "prep-toolbar" }, h("p", { class: "prep-intro" }, addition ? t("组件将安装在 {0}，用于自动识别会话、找回原对话。", [machine.label])
+      : t("每台机器独立配置，组件用于自动识别并找回原对话。")), !addition ? recheck : null),
+    scopeKind && !addition ? h("button", { class: "ap-environment-action prep-show-all", type: "button", onclick: () => { close(); showAgentPreparation(machine, snapshot, { onUpdate: options.onUpdate }); } }, t("查看全部 Agent")) : null), content, footer);
   document.body.append(dialog);
   dialog.addEventListener("close", () => { closed = true; clearTimeout(timer); dialog.remove(); finish(acceptAddition); });
   render(); dialog.showModal(); if (!initial) void check(); if (operation?.state === "running") void poll();
@@ -1092,8 +1105,8 @@ function copyBlock(text, label) {
   return h("div", { class: "copy-block" },
     h("pre", null, text),
     h("button", { class: "btn", type: "button", onclick: async () => {
-      try { await navigator.clipboard.writeText(text); toast(`已复制${label}`); } catch { toast("复制失败：请手动选中复制", true); }
-    } }, "复制"));
+      try { await navigator.clipboard.writeText(text); toast(t("已复制{0}", [label])); } catch { toast(t("复制失败：请手动选中复制"), true); }
+    } }, t("复制")));
 }
 
 /**
@@ -1114,13 +1127,13 @@ function machinesView(main) {
   // herdr-web-ui is optional: without it each machine opens in Herdr only, and this says how to get it
   const webUiTip = h("p", { class: "webui-tip", hidden: true });
   let adding = false;
-  const addBtn = h("button", { class: "btn quiet", type: "button", onclick: () => showAdd(!adding) }, "+ 添加");
+  const addBtn = h("button", { class: "btn quiet", type: "button", onclick: () => showAdd(!adding) }, t("+ 添加"));
   const addPanel = h("section", { class: "add-panel", hidden: true },
-    h("div", { class: "add-head" }, h("span", null, "添加 SSH 机器"), h("span", { class: "spacer" }),
-      h("button", { class: "btn quiet", type: "button", title: "收起（Esc）", onclick: () => showAdd(false) }, "关闭")),
+    h("div", { class: "add-head" }, h("span", null, t("添加 SSH 机器")), h("span", { class: "spacer" }),
+      h("button", { class: "btn quiet", type: "button", title: t("收起（Esc）"), onclick: () => showAdd(false) }, t("关闭"))),
     wizardBox);
-  main.append(topbar(h("span", { class: "title" }, connectionHelp ? "连接设置" : "机器"), healthNote, h("span", { class: "spacer" }),
-    h("button", { class: "btn quiet", type: "button", onclick: () => loadHealth(true) }, "检查连接"), addBtn),
+  main.append(topbar(h("span", { class: "title" }, connectionHelp ? t("连接设置") : t("机器")), healthNote, h("span", { class: "spacer" }),
+    h("button", { class: "btn quiet", type: "button", onclick: () => loadHealth(true) }, t("检查连接")), addBtn),
   h("div", { class: "scroll" }, h("div", { class: "column" },
     connectionHelp ? h("p", { class: "wnote" }, `${connectionHelp.machine}：${connectionHelp.reason}`) : null,
     addPanel, importBox, webUiTip,
@@ -1132,7 +1145,7 @@ function machinesView(main) {
     if (on) {
       renderWizard();
       addPanel.scrollIntoView({ block: "nearest" });
-      const field = wizardBox.querySelector("input[aria-label='服务器地址']");
+      const field = wizardBox.querySelector(`input[aria-label='${t("服务器地址")}']`);
       if (field && !field.disabled) field.focus();
     }
   }
@@ -1145,15 +1158,15 @@ function machinesView(main) {
   let renaming = null;
 
   async function loadHealth(fresh) {
-    healthNote.textContent = "正在检查连接…";
+    healthNote.textContent = t("正在检查连接…");
     try {
       const r = await api(`/api/machines/health${fresh ? "?fresh=1" : ""}`);
       health = r.health || {};
       healthError = r.error;
       healthAt = r.at || Date.now();
-      healthNote.textContent = healthError ? `检查失败：${healthError}` : "";
+      healthNote.textContent = healthError ? t("检查失败：{0}", [healthError]) : "";
     } catch (error) {
-      healthNote.textContent = `检查失败：${error.message}`;
+      healthNote.textContent = t("检查失败：{0}", [error.message]);
     }
     listShape = "";
     renderList();
@@ -1165,32 +1178,32 @@ function machinesView(main) {
   const agentCount = (id) => ((data.agents.find((g) => g.machine.id === id) || { agents: [] }).agents || []).length;
 
   function stateOf(m) {
-    if (m.id === "local") return machineDown("local") ? ["bad", "连不上：Herdr 没在运行"] : ["ok", "运行中"];
-    if (!m.enabled) return ["dim", "已停用"];
+    if (m.id === "local") return machineDown("local") ? ["bad", t("连不上：Herdr 没在运行")] : ["ok", t("运行中")];
+    if (!m.enabled) return ["dim", t("已停用")];
     const h1 = health[m.id];
-    if (machineDown(m.id)) return ["bad", `连不上${h1 && h1.text ? `：${h1.text}` : ""}`];
+    if (machineDown(m.id)) return ["bad", t("连不上{0}", [h1 && h1.text ? `：${h1.text}` : ""])];
     if (h1 && h1.ok === false) return ["bad", h1.text];
-    if (h1 && h1.ok === true) return ["ok", "连接正常"];
-    return ["dim", healthAt ? "没有状态" : "未检查"];
+    if (h1 && h1.ok === true) return ["ok", t("连接正常")];
+    return ["dim", healthAt ? t("没有状态") : t("未检查")];
   }
 
   function machineRow(m) {
-    const [t, text] = stateOf(m);
+    const [stateTone, text] = stateOf(m);
     const local = m.id === "local";
     const count = agentCount(m.id);
     const active = activeOn(m.id);
     // herdr-web-ui only when it runs; not installed or not started, the tip above the list says so
     const webUnavailable = m.web_link_reason;
     const openWebUi = !data.webUi.running ? null : m.web_link && !webUnavailable
-      ? h("a", { class: "machine-webui", href: webUiLink(m.web_link), target: "herdr-web-ui", title: `在 herdr-web-ui 中使用 ${m.label}` }, "打开 herdr-web-ui ↗")
-      : h("button", { class: "machine-webui", type: "button", disabled: true, title: webUnavailable || "正在读取工作区" }, "打开 herdr-web-ui ↗");
+      ? h("a", { class: "machine-webui", href: webUiLink(m.web_link), target: "herdr-web-ui", title: t("在 herdr-web-ui 中使用 {0}", [m.label]) }, t("打开 herdr-web-ui ↗"))
+      : h("button", { class: "machine-webui", type: "button", disabled: true, title: webUnavailable || t("正在读取工作区") }, t("打开 herdr-web-ui ↗"));
     // switches what this computer's Herdr shows: useless from a phone or another computer
     const openHerdr = !config.local ? null : h("button", { class: "machine-webui", type: "button", disabled: !!m.web_link_reason,
-      title: m.web_link_reason || `让这台电脑上的 Herdr 切到 ${m.label} 的工作区`, onclick: async () => {
+      title: m.web_link_reason || t("让这台电脑上的 Herdr 切到 {0} 的工作区", [m.label]), onclick: async () => {
         try { toast((await post(`/api/machines/${encodeURIComponent(m.id)}/focus`)).message); } catch (error) { toast(error.message, true); }
-      } }, "在 Herdr 中打开");
+      } }, t("在 Herdr 中打开"));
     const opens = openHerdr || openWebUi ? h("span", { class: "mopen" }, openHerdr, openWebUi) : null;
-    const checked = !local && healthAt && health[m.id] ? `${ago(healthAt)}检查` : null;
+    const checked = !local && healthAt && health[m.id] ? t("{0}检查", [ago(healthAt)]) : null;
     const stopRename = () => { renaming = null; listShape = ""; renderList(); };
     const name = renaming === m.id
       ? h("form", { class: "rename", onsubmit: async (event) => {
@@ -1202,32 +1215,32 @@ function machinesView(main) {
           document.activeElement.blur();
           listShape = "";
           renderList();
-          toast(`已重命名为 ${label}`);
+          toast(t("已重命名为 {0}", [label]));
         } catch (error) { toast(error.message, true); }
-      } }, h("input", { name: "label", value: m.label, "aria-label": "新名称", maxlength: "60",
+      } }, h("input", { name: "label", value: m.label, "aria-label": t("新名称"), maxlength: "60",
         onkeydown: (event) => { if (event.key === "Escape") { event.stopPropagation(); stopRename(); } } }),
-      h("button", { class: "btn primary", type: "submit" }, "保存"),
-      h("button", { class: "btn quiet", type: "button", onclick: stopRename }, "取消"))
+      h("button", { class: "btn primary", type: "submit" }, t("保存")),
+      h("button", { class: "btn quiet", type: "button", onclick: stopRename }, t("取消")))
       : h("span", { class: "mname", title: m.label }, m.label);
     const actions = local ? [] : [
-      h("button", { class: "btn quiet", type: "button", onclick: () => { renaming = m.id; listShape = ""; renderList(); } }, "重命名"),
-      h("button", { class: "btn quiet", type: "button", title: m.enabled ? "暂时不连接这台机器，记录保留" : "重新连接这台机器", onclick: async () => {
-        try { await post(`/api/machines/${encodeURIComponent(m.id)}/${m.enabled ? "disable" : "enable"}`); toast(m.enabled ? `已停用 ${m.label}` : `已启用 ${m.label}`); } catch (error) { toast(error.message, true); }
-      } }, m.enabled ? "停用" : "启用"),
-      confirmButton("删除", active ? `还有 ${active} 个进行中的广播，确认删除` : "再点一次删除", async () => {
+      h("button", { class: "btn quiet", type: "button", onclick: () => { renaming = m.id; listShape = ""; renderList(); } }, t("重命名")),
+      h("button", { class: "btn quiet", type: "button", title: m.enabled ? t("暂时不连接这台机器，记录保留") : t("重新连接这台机器"), onclick: async () => {
+        try { await post(`/api/machines/${encodeURIComponent(m.id)}/${m.enabled ? "disable" : "enable"}`); toast(m.enabled ? t("已停用 {0}", [m.label]) : t("已启用 {0}", [m.label])); } catch (error) { toast(error.message, true); }
+      } }, m.enabled ? t("停用") : t("启用")),
+      confirmButton(t("删除"), active ? t("还有 {0} 个进行中的广播，确认删除", [active]) : t("再点一次删除"), async () => {
         await api(`/api/machines/${encodeURIComponent(m.id)}`, { method: "DELETE" });
-        toast(`已删除 ${m.label}`);
+        toast(t("已删除 {0}", [m.label]));
       }, { class: "btn quiet danger", title: active
-        ? `这台机器上还有 ${active} 个进行中的广播：删除后它们连不上这台机器，会停在原地。远程的 agent 本身照常运行`
-        : "只让本机忘记这个连接，远程的会话和 agent 照常运行" }),
+        ? t("这台机器上还有 {0} 个进行中的广播：删除后它们连不上这台机器，会停在原地。远程的 agent 本身照常运行", [active])
+        : t("只让本机忘记这个连接，远程的会话和 agent 照常运行") }),
     ];
-    actions.unshift(h("button", { class: "btn quiet", type: "button", disabled: !m.enabled, onclick: () => showAgentPreparation(m) }, "准备 Agent"));
+    actions.unshift(h("button", { class: "btn quiet", type: "button", disabled: !m.enabled, onclick: () => showAgentPreparation(m) }, t("准备 Agent")));
     return h("div", { class: `mrow${!m.enabled ? " off" : ""}` },
-      h("span", { class: `dot ${t}` }),
+        h("span", { class: `dot ${stateTone}` }),
       h("div", { class: "mmain" }, name,
-        h("span", { class: "maddr" }, local ? "这台电脑" : m.target),
-        h("span", { class: "mmeta" }, [count ? `${count} 个 agent` : "没有 agent", active ? `${active} 个进行中的广播` : null, checked].filter(Boolean).join("　·　")), opens),
-      h("span", { class: "mstate" }, h("span", { class: `state-pill c-${t}`, title: text }, text)),
+        h("span", { class: "maddr" }, local ? t("这台电脑") : m.target),
+        h("span", { class: "mmeta" }, [count ? t("{0} 个 agent", [count]) : t("没有 agent"), active ? t("{0} 个进行中的广播", [active]) : null, checked].filter(Boolean).join("　·　")), opens),
+      h("span", { class: "mstate" }, h("span", { class: `state-pill c-${stateTone}`, title: text }, text)),
       h("span", { class: "mactions" }, actions));
   }
 
@@ -1238,9 +1251,9 @@ function machinesView(main) {
     webUiTip.dataset.shape = shape;
     webUiTip.hidden = data.webUi.running;
     webUiTip.replaceChildren(...(data.webUi.installed
-      ? ["启动 herdr-web-ui 后，这里每台机器都能直接在浏览器里打开对话和终端。"]
-      : ["安装 ", h("a", { href: WEB_UI_REPO, target: "_blank", rel: "noopener" }, "herdr-web-ui"),
-        " 后，这里每台机器都能直接在浏览器里打开对话和终端：在终端运行 ", h("code", null, WEB_UI_INSTALL), "。"]));
+      ? [t("启动 herdr-web-ui 后，这里每台机器都能直接在浏览器里打开对话和终端。")]
+      : [t("安装 "), h("a", { href: WEB_UI_REPO, target: "_blank", rel: "noopener" }, "herdr-web-ui"),
+        t(" 后，这里每台机器都能直接在浏览器里打开对话和终端：在终端运行 "), h("code", null, WEB_UI_INSTALL), "。"]));
   }
 
   /** one line above the list: how many machines, how many answer */
@@ -1248,9 +1261,9 @@ function machinesView(main) {
     const remotes = data.state.machines.filter((m) => m.id !== "local");
     const bad = remotes.filter((m) => stateOf(m)[0] === "bad").length;
     const off = remotes.filter((m) => !m.enabled).length;
-    const parts = [remotes.length ? `${remotes.length} 台 SSH 机器` : "只有这台电脑"];
-    if (bad) parts.push(`${bad} 台连不上`);
-    if (off) parts.push(`${off} 台已停用`);
+    const parts = [remotes.length ? t("{0} 台 SSH 机器", [remotes.length]) : t("只有这台电脑")];
+    if (bad) parts.push(t("{0} 台连不上", [bad]));
+    if (off) parts.push(t("{0} 台已停用", [off]));
     healthNote.textContent = parts.join("　·　");
     healthNote.className = `health-note${bad ? " bad" : ""}`;
   }
@@ -1265,7 +1278,7 @@ function machinesView(main) {
     if (renaming !== null && list.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;
     listShape = shape;
     list.replaceChildren(...data.state.machines.map(machineRow));
-    if (data.state.machines.length <= 1) list.append(h("div", { class: "empty-note" }, "还没有 SSH 机器：在上面添加一台。"));
+    if (data.state.machines.length <= 1) list.append(h("div", { class: "empty-note" }, t("还没有 SSH 机器：在上面添加一台。")));
     const input = list.querySelector(".rename input");
     if (input) { input.focus(); input.select(); }
   }
@@ -1295,14 +1308,14 @@ function machinesView(main) {
     importBox.replaceChildren();
     if (!imports.machines.length) return;
     importBox.append(
-      h("div", { class: "import-head" }, h("b", null, `herdr-web-ui 里有 ${imports.machines.length} 台机器还没加到 Herdr`),
-        h("span", { class: "sub" }, `它们只存在 herdr-web-ui 自己的 ${imports.file} 里，Herdr 和广播都看不到。`)),
+      h("div", { class: "import-head" }, h("b", null, t("herdr-web-ui 里有 {0} 台机器还没加到 Herdr", [imports.machines.length])),
+        h("span", { class: "sub" }, t("它们只存在 herdr-web-ui 自己的 {0} 里，Herdr 和广播都看不到。", [imports.file]))),
       h("div", { class: "import-list" }, imports.machines.map((m) => h("div", { class: "import-item" },
         h("div", { class: "import-main" }, h("span", { class: "mname" }, m.name),
-          h("code", null, [m.target, m.key ? `私钥 ${m.key}` : null, m.session ? `会话 ${m.session}` : null].filter(Boolean).join("　")),
+          h("code", null, [m.target, m.key ? t("私钥 {0}", [m.key]) : null, m.session ? t("会话 {0}", [m.session]) : null].filter(Boolean).join("　")),
           m.error ? h("span", { class: "wnote bad" }, m.error) : null,
-          m.appKey ? h("span", { class: "wsub" }, "这把私钥是 herdr-web-ui 生成的：在 herdr-web-ui 里删掉这台机器时它也会被删掉，Herdr 就登录不上了。") : null),
-        h("button", { class: "btn", type: "button", disabled: !!m.error || w.busy, onclick: () => fillFrom(m) }, "加到 Herdr →")))));
+          m.appKey ? h("span", { class: "wsub" }, t("这把私钥是 herdr-web-ui 生成的：在 herdr-web-ui 里删掉这台机器时它也会被删掉，Herdr 就登录不上了。")) : null),
+        h("button", { class: "btn", type: "button", disabled: !!m.error || w.busy, onclick: () => fillFrom(m) }, t("加到 Herdr →"))))));
   }
 
   // ---- the wizard ----
@@ -1328,11 +1341,11 @@ function machinesView(main) {
     if (login.ok) w.step = "add";
     else if (login.problem === "host-key-changed") {
       w.step = "address";
-      w.error = "这台服务器的主机指纹和以前记录的不一样了。可能是服务器重装过，也可能有人冒充它。确认没问题后，在终端运行下面的命令删掉旧记录，再点下一步。";
+      w.error = t("这台服务器的主机指纹和以前记录的不一样了。可能是服务器重装过，也可能有人冒充它。确认没问题后，在终端运行下面的命令删掉旧记录，再点下一步。");
       w.forget = login.forget;
     } else if (login.problem === "auth" || login.problem === "host-key") w.step = "key";
     else if (login.diagnosis) { w.step = "address"; w.diagnosis = login.diagnosis; }
-    else { w.step = "address"; w.error = `连不上：${login.error || login.problem}`; }
+    else { w.step = "address"; w.error = t("连不上：{0}", [login.error || login.problem]); }
   }
 
   async function doCheck() {
@@ -1342,7 +1355,7 @@ function machinesView(main) {
     w.key = r.key;
     if (r.login) afterLogin(r.login);
     else if (r.diagnosis) { w.step = "address"; w.diagnosis = r.diagnosis; }
-    else if (r.scanError) { w.step = "address"; w.error = `连不上服务器：${r.scanError}`; }
+    else if (r.scanError) { w.step = "address"; w.error = t("连不上服务器：{0}", [r.scanError]); }
     else w.step = "hostkey";
   }
   const check = () => act(doCheck);
@@ -1359,13 +1372,13 @@ function machinesView(main) {
   const fixKey = () => act(async () => {
     await post("/api/ssh/key-fix", { key: w.entry.key.path });
     w.entry = await post("/api/ssh/config-entry", { target: w.target, label: w.label, key: w.keyPath, name: w.entryName });
-    toast("已把私钥权限改成 600");
+    toast(t("已把私钥权限改成 600"));
   });
 
   const writeEntry = () => act(async () => {
     const r = await post("/api/ssh/config-write", { target: w.target, key: w.keyPath, name: w.entryName });
     w.backup = r.backup;
-    toast(`已写入 ~/.ssh/config：Host ${r.name}`);
+    toast(t("已写入 ~/.ssh/config：Host {0}", [r.name]));
     // from here on the server is reached by its name, as ssh and Herdr will; the key is in the entry
     w.target = r.name;
     w.keyPath = "";
@@ -1383,14 +1396,14 @@ function machinesView(main) {
     afterLogin(r.login);
     const own = w.check && w.check.resolved && w.check.resolved.identity;
     if (!r.login.ok && r.login.problem === "auth") w.error = own
-      ? `还是登录不上：服务器没有接受 ${own.display}。检查用户名（现在是 ${w.check.resolved.user}）对不对，以及这把私钥是不是这台服务器的。`
-      : "还是登录不上：服务器没有接受这把公钥。检查公钥有没有完整放进 ~/.ssh/authorized_keys，以及文件权限。";
+      ? t("还是登录不上：服务器没有接受 {0}。检查用户名（现在是 {1}）对不对，以及这把私钥是不是这台服务器的。", [own.display, w.check.resolved.user])
+      : t("还是登录不上：服务器没有接受这把公钥。检查公钥有没有完整放进 ~/.ssh/authorized_keys，以及文件权限。");
   });
 
   const keygen = () => act(async () => {
     const r = await post("/api/ssh/keygen", {});
     w.key = r.key;
-    toast("已生成密钥");
+    toast(t("已生成密钥"));
   });
 
   /** `herdr machine add`, run by the server in a terminal of its own; `install`: approved here */
@@ -1407,7 +1420,7 @@ function machinesView(main) {
       await new Promise((resolve) => setTimeout(resolve, w.job.state === "question" ? 1500 : 700));
       if (!w.job || w.job.id !== id) return;
       try { w.job = (await api(`/api/machines/add/${id}`)).job; } catch (error) { w.error = error.message; return renderWizard(); }
-      if (w.job.state === "done") { w.step = "done"; toast("已添加"); }
+      if (w.job.state === "done") { w.step = "done"; toast(t("已添加")); }
       renderWizard();
     }
   }
@@ -1449,40 +1462,40 @@ function machinesView(main) {
       const d = job.download || { done: 0, total: null, what: "Herdr" };
       const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
       out.push(h("div", { class: "wrow" },
-        h("span", { class: "wnote" }, `正在这台电脑上下载 ${d.what}：${mb(d.done)}${d.total ? ` / ${mb(d.total)}（${Math.floor((d.done / d.total) * 100)}%）` : ""}`),
-        h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, "取消")),
+        h("span", { class: "wnote" }, t("正在这台电脑上下载 {0}：{1}{2}", [d.what, mb(d.done), d.total ? ` / ${mb(d.total)}（${Math.floor((d.done / d.total) * 100)}%）` : ""])),
+        h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, t("取消"))),
         d.total ? h("progress", { max: d.total, value: d.done }) : null,
-        h("p", { class: "wsub" }, "从 GitHub 下载，断了会接着下，下载完核对校验值。下好后通过 SSH 传到服务器，以后再加机器不用重新下载。"));
+        h("p", { class: "wsub" }, t("从 GitHub 下载，断了会接着下，下载完核对校验值。下好后通过 SSH 传到服务器，以后再加机器不用重新下载。")));
     } else if (job.state === "running") {
-      out.push(h("div", { class: "wrow" }, h("span", { class: "wnote" }, "正在连接服务器、准备 Herdr…（下载安装可能要一两分钟）"),
-        h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, "取消")));
+      out.push(h("div", { class: "wrow" }, h("span", { class: "wnote" }, t("正在连接服务器、准备 Herdr…（下载安装可能要一两分钟）")),
+        h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, t("取消"))));
     } else if (job.state === "question") {
       const q = job.question;
-      const box = [h("p", { class: "wnote" }, "Herdr 在问：", h("code", null, q.text))];
+      const box = [h("p", { class: "wnote" }, t("Herdr 在问："), h("code", null, q.text))];
       if (q.context) box.push(h("pre", { class: "wout" }, q.context));
       if (q.kind === "server") {
-        box.push(h("p", { class: "wnote warn" }, "服务器上已经有一个 Herdr 服务在运行。重启它会关闭里面所有的终端和 agent（正在跑的任务会中断）。"));
-        if (login.webUiHerdr) box.push(h("p", { class: "wnote warn" }, `这个服务多半是 herdr-web-ui 启动的（${login.webUiHerdr}）：重启后 herdr-web-ui 里这台机器上的终端和 agent 会被关闭，需要在那边重新连接。`));
-        if (!w.session) box.push(h("p", { class: "wsub" }, `不想动它，可以改用单独的会话「${SEPARATE_SESSION}」：Herdr 在旁边另起一个服务，现有的完全不受影响；但广播只能看到这个新会话里的 agent，看不到原来那个服务里的。`));
+        box.push(h("p", { class: "wnote warn" }, t("服务器上已经有一个 Herdr 服务在运行。重启它会关闭里面所有的终端和 agent（正在跑的任务会中断）。")));
+        if (login.webUiHerdr) box.push(h("p", { class: "wnote warn" }, t("这个服务多半是 herdr-web-ui 启动的（{0}）：重启后 herdr-web-ui 里这台机器上的终端和 agent 会被关闭，需要在那边重新连接。", [login.webUiHerdr])));
+        if (!w.session) box.push(h("p", { class: "wsub" }, t("不想动它，可以改用单独的会话「{0}」：Herdr 在旁边另起一个服务，现有的完全不受影响；但广播只能看到这个新会话里的 agent，看不到原来那个服务里的。", [SEPARATE_SESSION])));
         box.push(h("div", { class: "wrow" },
-          h("button", { class: "btn", type: "button", disabled, onclick: () => answer(true) }, "重启服务"),
-          !w.session ? h("button", { class: "btn primary", type: "button", disabled, onclick: separateSession }, "不重启，用单独会话") : null,
-          h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, "取消添加")));
+          h("button", { class: "btn", type: "button", disabled, onclick: () => answer(true) }, t("重启服务")),
+          !w.session ? h("button", { class: "btn primary", type: "button", disabled, onclick: separateSession }, t("不重启，用单独会话")) : null,
+          h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, t("取消添加"))));
       } else {
-        if (q.kind === "install") box.push(h("p", { class: "wnote" }, "要在服务器上安装 Herdr。"));
+        if (q.kind === "install") box.push(h("p", { class: "wnote" }, t("要在服务器上安装 Herdr。")));
         box.push(h("div", { class: "wrow" },
-          h("button", { class: "btn primary", type: "button", disabled, onclick: () => answer(true) }, "同意"),
-          h("button", { class: "btn", type: "button", disabled, onclick: () => answer(false) }, "不同意"),
-          h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, "取消添加")));
+          h("button", { class: "btn primary", type: "button", disabled, onclick: () => answer(true) }, t("同意")),
+          h("button", { class: "btn", type: "button", disabled, onclick: () => answer(false) }, t("不同意")),
+          h("button", { class: "btn quiet", type: "button", disabled, onclick: cancelJob }, t("取消添加"))));
       }
       out.push(h("div", { class: "question", role: "alert" }, box));
     } else if (job.state === "failed" || job.state === "cancelled") {
-      out.push(h("p", { class: "wnote bad" }, job.reason || (job.state === "cancelled" ? "已取消，机器没有保存。" : "没能添加，机器没有保存。Herdr 的输出在下面。")));
-      if (/download failed/i.test(log)) out.push(h("p", { class: "wnote" }, "Herdr 自己下载超时了（它对下载限时很短）。再点一次「安装并连接」：插件会先在这台电脑上下载好再传过去。"));
-      else if (/not installed|approve installation/i.test(log)) out.push(h("p", { class: "wnote" }, "服务器上还缺 Herdr：用「安装并连接」装好再连。"));
-      else if (/server is not ready for saved machines/i.test(log)) out.push(h("p", { class: "wnote" }, "服务器上原来的 Herdr 服务没有重启，Herdr 不能用它保存机器。再试一次，选「重启服务」或「用单独会话」。"));
+      out.push(h("p", { class: "wnote bad" }, job.reason || (job.state === "cancelled" ? t("已取消，机器没有保存。") : t("没能添加，机器没有保存。Herdr 的输出在下面。"))));
+      if (/download failed/i.test(log)) out.push(h("p", { class: "wnote" }, t("Herdr 自己下载超时了（它对下载限时很短）。再点一次「安装并连接」：插件会先在这台电脑上下载好再传过去。")));
+      else if (/not installed|approve installation/i.test(log)) out.push(h("p", { class: "wnote" }, t("服务器上还缺 Herdr：用「安装并连接」装好再连。")));
+      else if (/server is not ready for saved machines/i.test(log)) out.push(h("p", { class: "wnote" }, t("服务器上原来的 Herdr 服务没有重启，Herdr 不能用它保存机器。再试一次，选「重启服务」或「用单独会话」。")));
     }
-    if (log) out.push(h("details", { open: job.state === "failed" || null }, h("summary", null, "Herdr 的输出"), h("pre", { class: "wout" }, log)));
+    if (log) out.push(h("details", { open: job.state === "failed" || null }, h("summary", null, t("Herdr 的输出")), h("pre", { class: "wout" }, log)));
     return out;
   }
 
@@ -1495,13 +1508,13 @@ function machinesView(main) {
     const steps = [];
     const step = (title, state, ...body) => steps.push({ title, state, body: body.flat().filter(Boolean) });
     const out = [];
-    if (!config.local) out.push(h("p", { class: "wnote bad" }, "添加机器只能在这台电脑本机的浏览器里操作（地址用 localhost 或 127.0.0.1 打开本页）。"));
+    if (!config.local) out.push(h("p", { class: "wnote bad" }, t("添加机器只能在这台电脑本机的浏览器里操作（地址用 localhost 或 127.0.0.1 打开本页）。")));
 
     // the address; name and key are the less common part, behind 更多选项 once there are machines
     const typed = splitAddress(w.target);
     const editing = disabled || w.step !== "address";
     const take = () => { w.target = joinAddress(addr.value, port.value); w.label = label.value; w.keyPath = keyField.value; };
-    const next = h("button", { class: "btn primary", type: "button", disabled: disabled || !w.target.trim(), onclick: () => { take(); start(); } }, w.busy ? "检查中…" : "检查");
+    const next = h("button", { class: "btn primary", type: "button", disabled: disabled || !w.target.trim(), onclick: () => { take(); start(); } }, w.busy ? t("检查中…") : t("检查"));
     const changed = () => {
       w.target = joinAddress(addr.value, port.value);
       next.disabled = disabled || !w.target.trim();
@@ -1522,34 +1535,34 @@ function machinesView(main) {
       w.label = label.value;
       moreOpen = moreOpen || !!parts.key;
       renderWizard();
-      const again = wizardBox.querySelector("input[aria-label='服务器地址']");
+      const again = wizardBox.querySelector(`input[aria-label='${t("服务器地址")}']`);
       if (again && !again.disabled) { again.focus(); again.setSelectionRange(again.value.length, again.value.length); }
     };
     const enter = (e) => { if (e.key === "Enter") { e.preventDefault(); tidy(false); take(); if (w.target.trim()) start(); } };
-    const addr = h("input", { class: "winput", value: typed.address, placeholder: "user@服务器地址，或 ~/.ssh/config 里的 Host 名", "aria-label": "服务器地址", disabled: editing, autocomplete: "off", spellcheck: "false",
+    const addr = h("input", { class: "winput", value: typed.address, placeholder: t("user@服务器地址，或 ~/.ssh/config 里的 Host 名"), "aria-label": t("服务器地址"), disabled: editing, autocomplete: "off", spellcheck: "false",
       oninput: changed, onchange: () => tidy(false), onpaste: () => setTimeout(() => tidy(true)), onkeydown: enter });
-    const port = h("input", { class: "winput port", value: typed.port, placeholder: "端口 22", inputmode: "numeric", maxlength: "5", "aria-label": "端口", disabled: editing,
+    const port = h("input", { class: "winput port", value: typed.port, placeholder: t("端口 22"), inputmode: "numeric", maxlength: "5", "aria-label": t("端口"), disabled: editing,
       oninput: (e) => { e.target.value = e.target.value.replace(/\D/g, ""); changed(); }, onkeydown: enter });
-    const label = h("input", { class: "winput short", value: w.label, placeholder: "显示名称（可选）", "aria-label": "显示名称", disabled: disabled || w.step !== "address",
+    const label = h("input", { class: "winput short", value: w.label, placeholder: t("显示名称（可选）"), "aria-label": t("显示名称"), disabled: disabled || w.step !== "address",
       oninput: (e) => { w.label = e.target.value; } });
-    const keyField = h("input", { class: "winput", value: w.keyPath, placeholder: "私钥文件（可选）：服务器要用 .pem 登录时填，例如 ~/.ssh/server.pem", "aria-label": "私钥文件", disabled: disabled || w.step !== "address",
+    const keyField = h("input", { class: "winput", value: w.keyPath, placeholder: t("私钥文件（可选）：服务器要用 .pem 登录时填，例如 ~/.ssh/server.pem"), "aria-label": t("私钥文件"), disabled: disabled || w.step !== "address",
       oninput: (e) => { w.keyPath = e.target.value; } });
     const r1 = w.check && w.check.resolved;
     const standsFor = r1 && r1.alias
-      ? h("p", { class: "wsub" }, "这个 Host 指向 ", h("code", null, `${r1.user ? `${r1.user}@` : ""}${r1.host}${r1.port !== 22 ? `:${r1.port}` : ""}`),
-        r1.identity ? ["，用私钥 ", h("code", null, r1.identity.display)] : null, "。")
+      ? h("p", { class: "wsub" }, t("这个 Host 指向 "), h("code", null, `${r1.user ? `${r1.user}@` : ""}${r1.host}${r1.port !== 22 ? `:${r1.port}` : ""}`),
+        r1.identity ? [t("，用私钥 "), h("code", null, r1.identity.display)] : null, "。")
       : null;
     const addressBody = [h("div", { class: "wrow" }, addr, port, w.step === "address" ? next : null,
       w.step === "address"
-        ? h("button", { class: "btn quiet more-options", type: "button", "aria-expanded": String(moreOpen), onclick: () => { moreOpen = !moreOpen; renderWizard(); } }, moreOpen ? "收起选项" : "更多选项")
-        : h("button", { class: "btn quiet", type: "button", disabled: w.busy, onclick: () => { reset(); renderWizard(); } }, "重新填写"))];
+        ? h("button", { class: "btn quiet more-options", type: "button", "aria-expanded": String(moreOpen), onclick: () => { moreOpen = !moreOpen; renderWizard(); } }, moreOpen ? t("收起选项") : t("更多选项"))
+        : h("button", { class: "btn quiet", type: "button", disabled: w.busy, onclick: () => { reset(); renderWizard(); } }, t("重新填写")))];
     if (w.step === "address" && moreOpen) addressBody.push(h("div", { class: "wrow" }, label, keyField));
-    if (w.step === "address" && !moreOpen && (w.label || w.keyPath)) addressBody.push(h("p", { class: "wsub" }, `名称 ${w.label || "未填"}　私钥 ${w.keyPath || "未填"}`));
-    if (w.step === "address" && defaultKey(w.keyPath)) addressBody.push(h("p", { class: "wsub" }, h("code", null, w.keyPath.trim()), " 是 ssh 的默认私钥，ssh 会自己用它，不用另写 SSH 配置。"));
-    if (w.step === "address") addressBody.push(h("p", { class: "wsub" }, "也可以粘贴 ssh 命令，例如 ", h("code", null, "ssh -p 2222 -i ~/.ssh/server.pem ubuntu@1.2.3.4"), "。"));
-    if (w.from) addressBody.push(h("p", { class: "wsub" }, `从 herdr-web-ui 的「${w.from.name}」填入${w.session ? `，用远程会话 ${w.session}` : ""}。`));
+    if (w.step === "address" && !moreOpen && (w.label || w.keyPath)) addressBody.push(h("p", { class: "wsub" }, t("名称 {0}　私钥 {1}", [w.label || t("未填"), w.keyPath || t("未填")])));
+    if (w.step === "address" && defaultKey(w.keyPath)) addressBody.push(h("p", { class: "wsub" }, h("code", null, w.keyPath.trim()), t(" 是 ssh 的默认私钥，ssh 会自己用它，不用另写 SSH 配置。")));
+    if (w.step === "address") addressBody.push(h("p", { class: "wsub" }, t("也可以粘贴 ssh 命令，例如 "), h("code", null, "ssh -p 2222 -i ~/.ssh/server.pem ubuntu@1.2.3.4"), "。"));
+    if (w.from) addressBody.push(h("p", { class: "wsub" }, t("从 herdr-web-ui 的「{0}」填入{1}。", [w.from.name, w.session ? t("，用远程会话 {0}", [w.session]) : ""])));
     addressBody.push(standsFor);
-    step("地址", stateOfStep("address"), addressBody);
+    step(t("地址"), stateOfStep("address"), addressBody);
 
     // a Host entry for a server with its own key
     if (w.entry && (w.step === "config" || at > order.indexOf("config"))) {
@@ -1557,63 +1570,63 @@ function machinesView(main) {
       const e = w.entry;
       const body = [];
       if (now) {
-        body.push(h("p", { class: "wnote" }, "这台服务器要用 ", h("code", null, e.key.display), " 登录。Herdr 连接时用的是系统的 ssh，所以要在 ", h("code", null, e.file), " 里加一段配置："));
-        if (e.key.loose) body.push(h("p", { class: "wnote warn" }, "这把私钥的权限太宽，ssh 会拒绝使用它（要求只有你自己能读）。",
-          h("button", { class: "btn", type: "button", disabled, onclick: fixKey }, "改成 600"), "　或在终端运行 ", h("code", null, `chmod 600 ${e.key.display}`)));
-        if (e.key.passphrase) body.push(h("p", { class: "wnote warn" }, "这把私钥有密码短语。Herdr 在后台连接时没人替你输入，写入配置后请在终端运行 ", h("code", null, `ssh-add --apple-use-keychain ${e.key.display}`), "。"));
-        const nameInput = h("input", { class: "winput short", value: w.entryName, "aria-label": "配置名", disabled, oninput: (ev) => { w.entryName = ev.target.value; } });
-        body.push(h("div", { class: "wrow" }, h("span", { class: "wsub" }, "配置名"), nameInput,
-          h("button", { class: "btn quiet", type: "button", disabled, onclick: () => preview(nameInput.value) }, "更新预览")));
-        if (e.taken) body.push(h("p", { class: "wnote bad" }, `配置里已经有 Host ${e.name} 了：换一个配置名。`));
-        body.push(copyBlock(e.text, "配置"),
-          h("p", { class: "wsub" }, "写在已有的 Host 配置前面（ssh 以先读到的为准），原文件另存为 config.herdr-broadcast.bak。私钥文件留在原处。"),
-          h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled: disabled || e.taken || e.key.loose, onclick: writeEntry }, w.busy ? "写入中…" : "写入配置并继续")));
+        body.push(h("p", { class: "wnote" }, t("这台服务器要用 "), h("code", null, e.key.display), t(" 登录。Herdr 连接时用的是系统的 ssh，所以要在 "), h("code", null, e.file), t(" 里加一段配置：")));
+        if (e.key.loose) body.push(h("p", { class: "wnote warn" }, t("这把私钥的权限太宽，ssh 会拒绝使用它（要求只有你自己能读）。"),
+          h("button", { class: "btn", type: "button", disabled, onclick: fixKey }, t("改成 600")), t("　或在终端运行 "), h("code", null, `chmod 600 ${e.key.display}`)));
+        if (e.key.passphrase) body.push(h("p", { class: "wnote warn" }, t("这把私钥有密码短语。Herdr 在后台连接时没人替你输入，写入配置后请在终端运行 "), h("code", null, `ssh-add --apple-use-keychain ${e.key.display}`), "。"));
+        const nameInput = h("input", { class: "winput short", value: w.entryName, "aria-label": t("配置名"), disabled, oninput: (ev) => { w.entryName = ev.target.value; } });
+        body.push(h("div", { class: "wrow" }, h("span", { class: "wsub" }, t("配置名")), nameInput,
+          h("button", { class: "btn quiet", type: "button", disabled, onclick: () => preview(nameInput.value) }, t("更新预览"))));
+        if (e.taken) body.push(h("p", { class: "wnote bad" }, t("配置里已经有 Host {0} 了：换一个配置名。", [e.name])));
+        body.push(copyBlock(e.text, t("配置")),
+          h("p", { class: "wsub" }, t("写在已有的 Host 配置前面（ssh 以先读到的为准），原文件另存为 config.herdr-broadcast.bak。私钥文件留在原处。")),
+          h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled: disabled || e.taken || e.key.loose, onclick: writeEntry }, w.busy ? t("写入中…") : t("写入配置并继续"))));
       } else {
-        body.push(h("p", { class: "wsub" }, "已写入 Host ", h("code", null, w.entryName), w.backup ? `，原文件备份在 ${w.backup}` : "", "。"));
+        body.push(h("p", { class: "wsub" }, t("已写入 Host "), h("code", null, w.entryName), w.backup ? t("，原文件备份在 {0}", [w.backup]) : "", "。"));
       }
-      step("SSH 配置", stateOfStep("config"), body);
+      step(t("SSH 配置"), stateOfStep("config"), body);
     }
 
     // the host key
     if (at >= order.indexOf("hostkey") && w.check && !w.check.known) {
       const now = w.step === "hostkey";
-      step("服务器指纹", stateOfStep("hostkey"),
-        now ? h("p", { class: "wnote" }, "第一次连接这台服务器。核对下面的指纹和服务器上的一致再信任它（在服务器上运行 ", h("code", null, "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"), " 可以看到）。") : null,
+      step(t("服务器指纹"), stateOfStep("hostkey"),
+        now ? h("p", { class: "wnote" }, t("第一次连接这台服务器。核对下面的指纹和服务器上的一致再信任它（在服务器上运行 "), h("code", null, "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub"), t(" 可以看到）。")) : null,
         h("ul", { class: "prints" }, w.check.keys.map((k) => h("li", null, h("span", { class: "ktype" }, k.type), h("code", null, k.fingerprint)))),
-        now ? h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: trust }, w.busy ? "写入中…" : "信任这台服务器")) : null);
+        now ? h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: trust }, w.busy ? t("写入中…") : t("信任这台服务器"))) : null);
     }
 
     // this computer's key on the server, or the key the config names for it
     if (at >= order.indexOf("key")) {
       const own = w.check && w.check.resolved && w.check.resolved.identity;
       if (w.step === "key" && own) {
-        const body = [h("p", { class: "wnote" }, "SSH 配置为这台服务器指定了私钥 ", h("code", null, own.display), "，但服务器没有接受它。")];
-        if (own.loose) body.push(h("p", { class: "wnote warn" }, "这把私钥的权限太宽，ssh 不会用它：在终端运行 ", h("code", null, `chmod 600 ${own.display}`), "。"));
-        if (own.passphrase) body.push(h("p", { class: "wnote warn" }, "这把私钥有密码短语：在终端运行 ", h("code", null, `ssh-add --apple-use-keychain ${own.display}`), "。"));
-        body.push(h("p", { class: "wnote" }, `也检查一下用户名（现在是 ${w.check.resolved.user || "未指定"}）对不对，以及这把私钥是不是这台服务器的。`),
-          h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: verify }, w.busy ? "验证中…" : "重新验证")));
-        step("免密登录", "now", body);
+        const body = [h("p", { class: "wnote" }, t("SSH 配置为这台服务器指定了私钥 "), h("code", null, own.display), t("，但服务器没有接受它。"))];
+        if (own.loose) body.push(h("p", { class: "wnote warn" }, t("这把私钥的权限太宽，ssh 不会用它：在终端运行 "), h("code", null, `chmod 600 ${own.display}`), "。"));
+        if (own.passphrase) body.push(h("p", { class: "wnote warn" }, t("这把私钥有密码短语：在终端运行 "), h("code", null, `ssh-add --apple-use-keychain ${own.display}`), "。"));
+        body.push(h("p", { class: "wnote" }, t("也检查一下用户名（现在是 {0}）对不对，以及这把私钥是不是这台服务器的。", [w.check.resolved.user || t("未指定")])),
+          h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: verify }, w.busy ? t("验证中…") : t("重新验证"))));
+        step(t("免密登录"), "now", body);
       } else if (w.step === "key") {
         const key = w.key;
         const body = [];
         if (!key) {
-          body.push(h("p", { class: "wnote" }, "这台 Mac 还没有 SSH 密钥。生成一把（~/.ssh/id_ed25519，没有密码短语），再把它的公钥放到服务器上。"),
-            h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: keygen }, "生成密钥")));
+          body.push(h("p", { class: "wnote" }, t("这台 Mac 还没有 SSH 密钥。生成一把（~/.ssh/id_ed25519，没有密码短语），再把它的公钥放到服务器上。")),
+            h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: keygen }, t("生成密钥"))));
         } else {
           const install = `mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${key.publicKey}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`;
           body.push(
-            h("p", { class: "wnote" }, "还不能免密登录。把这台 Mac 的公钥放到服务器上，任选一种："),
-            h("p", { class: "wsub" }, "在服务器上（已经登录进去的终端里）运行："),
-            copyBlock(install, "命令"),
-            h("p", { class: "wsub" }, "或者在这台 Mac 的终端里运行（会问一次服务器密码）："),
-            copyBlock(`ssh-copy-id -i ${key.path} ${w.target.replace(/^ssh:\/\//, "").replace(/:(\d+)$/, " -p $1")}`, "命令"),
-            h("details", null, h("summary", null, `只看公钥（${key.path}）`), copyBlock(key.publicKey, "公钥")));
-          if (key.passphrase) body.push(h("p", { class: "wnote warn" }, "这把私钥有密码短语。Herdr 在后台连接时没人替你输入，请先在终端运行 ", h("code", null, `ssh-add --apple-use-keychain ${key.path.replace(/\.pub$/, "")}`), "。"));
-          body.push(h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: verify }, w.busy ? "验证中…" : "放好了，验证连接")));
+            h("p", { class: "wnote" }, t("还不能免密登录。把这台 Mac 的公钥放到服务器上，任选一种：")),
+            h("p", { class: "wsub" }, t("在服务器上（已经登录进去的终端里）运行：")),
+            copyBlock(install, t("命令")),
+            h("p", { class: "wsub" }, t("或者在这台 Mac 的终端里运行（会问一次服务器密码）：")),
+            copyBlock(`ssh-copy-id -i ${key.path} ${w.target.replace(/^ssh:\/\//, "").replace(/:(\d+)$/, " -p $1")}`, t("命令")),
+            h("details", null, h("summary", null, t("只看公钥（{0}）", [key.path])), copyBlock(key.publicKey, t("公钥"))));
+          if (key.passphrase) body.push(h("p", { class: "wnote warn" }, t("这把私钥有密码短语。Herdr 在后台连接时没人替你输入，请先在终端运行 "), h("code", null, `ssh-add --apple-use-keychain ${key.path.replace(/\.pub$/, "")}`), "。"));
+          body.push(h("div", { class: "wrow" }, h("button", { class: "btn primary", type: "button", disabled, onclick: verify }, w.busy ? t("验证中…") : t("放好了，验证连接"))));
         }
-        step("免密登录", "now", body);
+        step(t("免密登录"), "now", body);
       } else {
-        step("免密登录", "done");
+        step(t("免密登录"), "done");
       }
     }
 
@@ -1621,41 +1634,41 @@ function machinesView(main) {
     if (at >= order.indexOf("add")) {
       const login = w.login || {};
       const needs = !sameHerdr(login.herdr, login.localHerdr);
-      const want = login.localHerdr || "与这台电脑相同版本的 Herdr";
-      const facts = [login.system ? login.system : null, `Herdr ${login.herdr || "未安装"}`].filter(Boolean).join("　·　");
-      const body = [h("p", { class: "wsub" }, "已经能免密登录。", facts)];
-      if (login.supported === false) body.push(h("p", { class: "wnote warn" }, "Herdr 只支持 x86_64 / aarch64 的 Linux 和 macOS，这台机器可能用不了。"));
+      const want = login.localHerdr || t("与这台电脑相同版本的 Herdr");
+      const facts = [login.system ? login.system : null, `Herdr ${login.herdr || t("未安装")}`].filter(Boolean).join("　·　");
+      const body = [h("p", { class: "wsub" }, t("已经能免密登录。"), facts)];
+      if (login.supported === false) body.push(h("p", { class: "wnote warn" }, t("Herdr 只支持 x86_64 / aarch64 的 Linux 和 macOS，这台机器可能用不了。")));
       const job = w.job;
       const live = job && ["downloading", "running", "question"].includes(job.state);
       if (w.step === "add" && !live) {
         if (needs) {
           body.push(h("p", { class: "wnote" }, login.herdr
-            ? `服务器上的 Herdr 是 ${login.herdr}，这台电脑是 ${want}：Herdr 要求两边版本一致。`
-            : "服务器上还没有 Herdr。"));
-          if (login.webUiHerdr) body.push(h("p", { class: "wsub" }, `服务器上有 herdr-web-ui 装的 ${login.webUiHerdr}（在 ~/.local/share/herdr-web-ui 里），那是它自己的私有副本，Herdr 不用它。两者互不影响。`));
+            ? t("服务器上的 Herdr 是 {0}，这台电脑是 {1}：Herdr 要求两边版本一致。", [login.herdr, want])
+            : t("服务器上还没有 Herdr。")));
+          if (login.webUiHerdr) body.push(h("p", { class: "wsub" }, t("服务器上有 herdr-web-ui 装的 {0}（在 ~/.local/share/herdr-web-ui 里），那是它自己的私有副本，Herdr 不用它。两者互不影响。", [login.webUiHerdr])));
           body.push(h("ul", { class: "plan" },
-            h("li", null, `把 ${want} 传到服务器的 `, h("code", null, "~/.local/bin/herdr"), "，不需要 root"),
-            h("li", null, "启动服务器上的 Herdr"),
-            h("li", null, "保存这台机器，之后 Herdr 侧边栏和广播都能用")),
-          h("p", { class: "wsub" }, "要停止或重启服务器上已经在运行的 Herdr 服务时，会先问你。"));
+            h("li", null, t("把 {0} 传到服务器的 ", [want]), h("code", null, "~/.local/bin/herdr"), t("，不需要 root")),
+            h("li", null, t("启动服务器上的 Herdr")),
+            h("li", null, t("保存这台机器，之后 Herdr 侧边栏和广播都能用"))),
+          h("p", { class: "wsub" }, t("要停止或重启服务器上已经在运行的 Herdr 服务时，会先问你。")));
         }
         body.push(h("div", { class: "wrow" },
-          h("button", { class: "btn primary", type: "button", disabled, onclick: () => add(needs) }, w.busy ? "开始中…" : needs ? "安装并连接" : "添加到 Herdr"),
-          h("button", { class: "btn quiet", type: "button", disabled, onclick: openTerminal, title: "在 Herdr 里开一个标签页运行添加命令，自己在终端里回答问题" }, "在终端里添加")));
+          h("button", { class: "btn primary", type: "button", disabled, onclick: () => add(needs) }, w.busy ? t("开始中…") : needs ? t("安装并连接") : t("添加到 Herdr")),
+          h("button", { class: "btn quiet", type: "button", disabled, onclick: openTerminal, title: t("在 Herdr 里开一个标签页运行添加命令，自己在终端里回答问题") }, t("在终端里添加"))));
       }
       if (job && w.step === "add") body.push(...jobView(job, login));
       if (w.step === "add" && w.terminal) {
-        body.push(h("p", { class: "wsub" }, `已在 Herdr 里打开「${w.terminal.workspaceLabel || "添加机器"}」，命令已经输入好了。完成后这里会自动显示新机器。`));
-        if (data.webUi.running && w.terminal.web_link) body.push(h("button", { class: "btn", type: "button", onclick: () => openInWebUi(w.terminal.web_link, "terminal") }, "在 herdr-web-ui 里打开这个终端"));
-        body.push(copyBlock(w.terminal.command, "命令"));
+        body.push(h("p", { class: "wsub" }, t("已在 Herdr 里打开「{0}」，命令已经输入好了。完成后这里会自动显示新机器。", [w.terminal.workspaceLabel || t("添加机器")])));
+        if (data.webUi.running && w.terminal.web_link) body.push(h("button", { class: "btn", type: "button", onclick: () => openInWebUi(w.terminal.web_link, "terminal") }, t("在 herdr-web-ui 里打开这个终端")));
+        body.push(copyBlock(w.terminal.command, t("命令")));
       }
-      step(needs && w.step !== "done" ? "安装 Herdr" : "保存到 Herdr", stateOfStep("add"), body);
+      step(needs && w.step !== "done" ? t("安装 Herdr") : t("保存到 Herdr"), stateOfStep("add"), body);
     }
 
     // the steps as a line of chips, the one in hand open below it
     const visible = steps.filter((x) => x.state !== "later");
     if (visible.length > 1) {
-      out.push(h("ol", { class: "steps", "aria-label": "步骤" }, visible.map((x) => h("li", { class: `chip ${x.state}` },
+      out.push(h("ol", { class: "steps", "aria-label": t("步骤") }, visible.map((x) => h("li", { class: `chip ${x.state}` },
         x.state === "done" ? h("span", { class: "tick", "aria-hidden": "true" }, "✓") : null, x.title))));
     }
     for (const x of steps) {
@@ -1665,24 +1678,24 @@ function machinesView(main) {
 
     if (w.step === "done") {
       const fresh = () => { Object.assign(w, { target: "", label: "", keyPath: "", session: null, from: null }); reset(); renderImports(); };
-      out.push(h("div", { class: "wdone" }, h("p", null, `已添加 ${w.label || w.target}，它现在在下面的列表和 Herdr 的侧边栏里。`),
+      out.push(h("div", { class: "wdone" }, h("p", null, t("已添加 {0}，它现在在下面的列表和 Herdr 的侧边栏里。", [w.label || w.target])),
         h("div", { class: "wrow" },
           h("button", { class: "btn", type: "button", onclick: () => {
             const machine = data.state.machines.find(m => m.target === w.target || m.target === w.target.replace(/^ssh:\/\//, ""));
-            if (machine) showAgentPreparation(machine); else toast("机器列表正在更新，请从下方机器的「准备 Agent」入口继续");
-          } }, "准备 Agent（可跳过）"),
-          h("button", { class: "btn primary", type: "button", onclick: () => { fresh(); renderWizard(); showAdd(false); } }, "完成"),
-          h("button", { class: "btn", type: "button", onclick: () => { fresh(); renderWizard(); } }, "再添加一台"))));
+            if (machine) showAgentPreparation(machine); else toast(t("机器列表正在更新，请从下方机器的「准备 Agent」入口继续"));
+          } }, t("准备 Agent（可跳过）")),
+          h("button", { class: "btn primary", type: "button", onclick: () => { fresh(); renderWizard(); showAdd(false); } }, t("完成")),
+          h("button", { class: "btn", type: "button", onclick: () => { fresh(); renderWizard(); } }, t("再添加一台")))));
     }
     if (w.diagnosis) {
       out.push(h("div", { class: "diagnosis", role: "alert" },
         h("p", { class: "wnote bad" }, w.diagnosis.message),
-        w.diagnosis.hints.length ? h("p", { class: "wsub" }, "可能的原因：") : null,
-        h("ul", null, w.diagnosis.hints.map((hint) => h("li", null, hint))),
-        h("button", { class: "btn", type: "button", disabled: w.busy, onclick: check }, "重试")));
+        w.diagnosis.hints.length ? h("p", { class: "wsub" }, t("可能的原因：")) : null,
+        h("ul", null, w.diagnosis.hints.map((hint) => h("li", null, BroadcastI18n.message(hint)))),
+        h("button", { class: "btn", type: "button", disabled: w.busy, onclick: check }, t("重试"))));
     }
     if (w.error) out.push(h("p", { class: "wnote bad", role: "alert" }, w.error));
-    if (w.forget) out.push(copyBlock(w.forget, "命令"));
+    if (w.forget) out.push(copyBlock(w.forget, t("命令")));
     // a step that opened in a terminal: done once the machine shows up
     if (w.terminal && w.step === "add" && data.state.machines.some((m) => m.target && (m.target === w.target || m.target === w.target.replace(/^ssh:\/\//, "")))) {
       w.step = "done";
@@ -1718,20 +1731,20 @@ function machinesView(main) {
 function connectionPresentation(e, ready, recovery = null, handedOff = false) {
   const states = {
     ready: { kind: "ready", text: "", action: null, button: "" },
-    connecting: { kind: "connecting", text: "正在连接…", action: null, button: "" },
-    handedOff: { kind: "handedOff", text: "画面已暂停，点击终端可接管", action: null, button: "" },
-    confirm: { kind: "confirm", text: "请在终端完成启动确认", action: "confirm", button: "查看并确认" },
-    manual: { kind: "manual", text: "请手动打开 agent 并选择原历史", action: "identity", button: "已恢复此会话" },
-    identity: { kind: "identity", text: "会话身份尚未核实", action: "identity", button: "核对会话" },
-    identityPending: { kind: "identityPending", text: "尚未获取会话标识", action: null, button: "" },
-    startConfirm: { kind: "confirm", text: "等待启动确认，完成后自动发送", action: "confirm", button: "查看并确认" },
-    choose: { kind: "choose", text: "请选择要继续的对话", action: "choose", button: "选择对话" },
-    settings: { kind: "settings", text: "设备连接需要设置", action: "settings", button: "打开连接设置" },
-    unavailable: { kind: "unavailable", text: "原对话无法恢复", action: "new", button: "新建对话" },
-    failed: { kind: "failed", text: "未能恢复对话", action: "continue", button: "重试" },
-    closed: { kind: "closed", text: "对话已关闭", action: "continue", button: "继续对话" },
+    connecting: { kind: "connecting", text: t("正在连接…"), action: null, button: "" },
+    handedOff: { kind: "handedOff", text: t("画面已暂停，点击终端可接管"), action: null, button: "" },
+    confirm: { kind: "confirm", text: t("请在终端完成启动确认"), action: "confirm", button: t("查看并确认") },
+    manual: { kind: "manual", text: t("请手动打开 agent 并选择原历史"), action: "identity", button: t("已恢复此会话") },
+    identity: { kind: "identity", text: t("会话身份尚未核实"), action: "identity", button: t("核对会话") },
+    identityPending: { kind: "identityPending", text: t("尚未获取会话标识"), action: null, button: "" },
+    startConfirm: { kind: "confirm", text: t("等待启动确认，完成后自动发送"), action: "confirm", button: t("查看并确认") },
+    choose: { kind: "choose", text: t("请选择要继续的对话"), action: "choose", button: t("选择对话") },
+    settings: { kind: "settings", text: t("设备连接需要设置"), action: "settings", button: t("打开连接设置") },
+    unavailable: { kind: "unavailable", text: t("原对话无法恢复"), action: "new", button: t("新建对话") },
+    failed: { kind: "failed", text: t("未能恢复对话"), action: "continue", button: t("重试") },
+    closed: { kind: "closed", text: t("对话已关闭"), action: "continue", button: t("继续对话") },
   };
-  if (e.custom_startup_pending) return { kind: "confirm", text: "等待确认就绪，尚未发送本轮输入", action: "custom-startup", button: "已进入新对话，发送本轮输入" };
+  if (e.custom_startup_pending) return { kind: "confirm", text: t("等待确认就绪，尚未发送本轮输入"), action: "custom-startup", button: t("已进入新对话，发送本轮输入") };
   if (e.requires_action) return states.settings;
   if (recovery === "unavailable" || e.restore_unavailable) return states.unavailable;
   if (recovery === "failed") return states.failed;
@@ -1747,7 +1760,7 @@ function connectionPresentation(e, ready, recovery = null, handedOff = false) {
   }
   // an agent that could not start: one line here, the shell's own words in the terminal below and the detail on hover
   if (["shell", "not_started"].includes(e.terminal_state) && e.state === "failed") {
-    return { kind: "start_failed", text: e.terminal_state === "shell" ? "Agent 未能启动，原因见下方终端" : "Agent 未能启动", action: null, button: "", detail: e.error || "" };
+    return { kind: "start_failed", text: e.terminal_state === "shell" ? t("Agent 未能启动，原因见下方终端") : t("Agent 未能启动"), action: null, button: "", detail: e.error || "" };
   }
   if (e.terminal_state === "not_started" && ["cancelled", "failed"].includes(e.state)) return states.ready;
   if (handedOff && !ready) return states.handedOff;
@@ -1783,25 +1796,25 @@ function broadcastAgents(b) {
  */
 function broadcastView(main, id, focusExec) {
   const titleEl = h("span", { class: "title" });
-  const promptText = h("div", { class: "round-prompt", tabindex: "0", role: "region", "aria-label": "本轮任务输入" });
+  const promptText = h("div", { class: "round-prompt", tabindex: "0", role: "region", "aria-label": t("本轮任务输入") });
   const metaText = h("span", { class: "round-meta" });
   const roundLabel = h("strong", { class: "round-label" });
   // Instructions are reference material; keep the live terminals in view by default.
   const promptDetails = h("details", { class: "round-instruction" },
-    h("summary", { class: "round-context-head" }, roundLabel, h("span", { class: "round-input-label" }, "任务输入"), metaText,
-      h("span", { class: "round-expand", "aria-hidden": "true" })), promptText);
+    h("summary", { class: "round-context-head" }, roundLabel, h("span", { class: "round-input-label" }, t("任务输入")), metaText,
+      h("span", { class: "round-expand", "aria-hidden": "true", "data-expand": t("展开"), "data-collapse": t("收起") })), promptText);
   const hint = h("p", { class: "webui-hint", hidden: true });
-  const summary = h("div", { class: "summary", role: "group", "aria-label": "按状态跳到 agent" });
+  const summary = h("div", { class: "summary", role: "group", "aria-label": t("按状态跳到 agent") });
   const wall = h("div", { class: "wall" });
   const panels = new Map();
   let selectedRoundId = null;
   const roundButtons = new Map();
-  const roundList = h("div", { class: "round-list", role: "group", "aria-label": "选择任务轮次" });
+  const roundList = h("div", { class: "round-list", role: "group", "aria-label": t("选择任务轮次") });
   const roundHeading = h("strong");
   const roundHistory = h("div", { class: "round-history" }, roundHeading, roundList);
-  const roundContext = h("section", { class: "round-context", "aria-label": "任务轮次与输入" }, roundHistory, promptDetails);
+  const roundContext = h("section", { class: "round-context", "aria-label": t("任务轮次与输入") }, roundHistory, promptDetails);
   const body = h("div", { class: "column wide" }, roundContext, hint, summary);
-  const fontLabel = h("button", { class: "btn quiet", type: "button", title: `恢复默认 ${screenFont.normal}px` });
+  const fontLabel = h("button", { class: "btn quiet", type: "button", title: t("恢复默认 {0}px", [screenFont.normal]) });
   /** one size for every screen on the wall, at once */
   const applyFont = (size) => {
     screenFont.size = size;
@@ -1809,10 +1822,10 @@ function broadcastView(main, id, focusExec) {
     fontLabel.textContent = `${screenFont.size}px`;
     for (const panel of panels.values()) panel.terminal.font(screenFont.size);
   };
-  const fontControl = h("span", { class: "font-size", role: "group", "aria-label": "终端文字大小" },
-    h("button", { class: "btn quiet", type: "button", title: "文字小一点", "aria-label": "文字小一点", onclick: () => applyFont(screenFont.size - 1) }, "A−"),
+  const fontControl = h("span", { class: "font-size", role: "group", "aria-label": t("终端文字大小") },
+    h("button", { class: "btn quiet", type: "button", title: t("文字小一点"), "aria-label": t("文字小一点"), onclick: () => applyFont(screenFont.size - 1) }, "A−"),
     fontLabel,
-    h("button", { class: "btn quiet", type: "button", title: "文字大一点", "aria-label": "文字大一点", onclick: () => applyFont(screenFont.size + 1) }, "A+"));
+    h("button", { class: "btn quiet", type: "button", title: t("文字大一点"), "aria-label": t("文字大一点"), onclick: () => applyFont(screenFont.size + 1) }, "A+"));
   fontLabel.addEventListener("click", () => applyFont(screenFont.normal));
   applyFont(screenFont.size);
   const actions = h("span", { class: "top-actions" });
@@ -1854,7 +1867,7 @@ function broadcastView(main, id, focusExec) {
     const shape = groups.map((g) => `${g.key}:${g.list.map((e) => e.id).join(",")}`).join("|");
     if (shape === summaryFor) return;
     summaryFor = shape;
-    summary.replaceChildren(...groups.map((g) => h("button", { class: "sum", type: "button", title: `跳到${g.text}的 agent`, onclick: () => {
+    summary.replaceChildren(...groups.map((g) => h("button", { class: "sum", type: "button", title: t("跳到{0}的 agent", [g.text]), onclick: () => {
       const next = ((jumped.get(g.key) ?? -1) + 1) % g.list.length;
       jumped.set(g.key, next);
       const panel = panels.get(g.list[next].id);
@@ -1873,7 +1886,7 @@ function broadcastView(main, id, focusExec) {
       p.count++; fresh.set(k, p);
     }
     sessionStorage.setItem(PREFILL_KEY, JSON.stringify({ title: b.title, prompt: b.prompt, fresh: [...fresh.values()] }));
-    if (missing) toast(`${missing} 个参与者无法转为新建配置，请重新选择并填写命令`);
+    if (missing) toast(t("{0} 个参与者无法转为新建配置，请重新选择并填写命令", [missing]));
     go("#/new");
   }
 
@@ -1882,45 +1895,45 @@ function broadcastView(main, id, focusExec) {
     if (e.can_cancel_start) buttons.push(h("button", { class: "btn quiet", type: "button", onclick: () => taskActionFor(e.id, async () => {
       await post(`/api/executions/${e.id}/cancel`);
       await refreshConversation();
-      toast("已取消本次发送，agent 保持打开。");
-    }) }, "取消本次发送"));
+      toast(t("已取消本次发送，agent 保持打开。"));
+    }) }, t("取消本次发送")));
     if (e.can_retry) {
-      buttons.push(confirmButton("再次发送本轮任务", "确认再次发送（新增一轮）", () => taskActionFor(e.id, async () => {
+      buttons.push(confirmButton(t("再次发送本轮任务"), t("确认再次发送（新增一轮）"), () => taskActionFor(e.id, async () => {
         const result = await post(`/api/executions/${e.id}/retry`);
         selectedRoundId = result.round_id;
         try { const fresh = await api("/api/state"); if (!disposed) { data = fresh; update(); } } catch { /* state stream will catch up */ }
-        toast(`已新增第 ${result.round_number} 轮，原记录已保留。`);
-      }), { class: "btn quiet", title: "会再次发送同一指令，新增一轮并保留原结果。请先核对原对话，避免重复执行。" }));
+        toast(t("已新增第 {0} 轮，原记录已保留。", [result.round_number]));
+      }), { class: "btn quiet", title: t("会再次发送同一指令，新增一轮并保留原结果。请先核对原对话，避免重复执行。") }));
     }
-    if (["working", "blocked"].includes(e.agent_status) && e.terminal_state === "live") buttons.push(confirmButton("中断 agent", "确认中断（发送 Ctrl+C）", () => taskActionFor(e.id, async () => {
+    if (["working", "blocked"].includes(e.agent_status) && e.terminal_state === "live") buttons.push(confirmButton(t("中断 agent"), t("确认中断（发送 Ctrl+C）"), () => taskActionFor(e.id, async () => {
       const current = panels.get(e.id)?.current;
       await post(`/api/executions/${e.id}/interrupt`, { terminal_id: current?.terminal_id });
-      toast("已发送 Ctrl+C，请查看终端确认。");
-    }), { class: "btn quiet", title: "向当前 agent 发送 Ctrl+C；不撤回消息，也不改变广播的发送结果。" }));
+      toast(t("已发送 Ctrl+C，请查看终端确认。"));
+    }), { class: "btn quiet", title: t("向当前 agent 发送 Ctrl+C；不撤回消息，也不改变广播的发送结果。") }));
     if (!e.pane_id || !SHOWN.includes(e.terminal_state)) return buttons;
     // switches what Herdr shows on this computer: useless from a phone or another computer
     if (config.local) {
-      buttons.push(h("button", { class: "btn quiet", type: "button", title: "让这台电脑上的 Herdr 切到这个 agent 所在的标签页", onclick: async () => {
+      buttons.push(h("button", { class: "btn quiet", type: "button", title: t("让这台电脑上的 Herdr 切到这个 agent 所在的标签页"), onclick: async () => {
         try { const { message } = await post(`/api/executions/${e.id}/focus`); toast(message); } catch { try { await refreshConversation(); } catch { /* automatic connection recovery */ } }
-      } }, "切到 Herdr"));
+      } }, t("切到 Herdr")));
     }
     if (data.webUi.running && e.web_link) {
       const openExternal = (mode) => {
         openInWebUi(e.web_link, mode);
       };
-      buttons.push(h("span", { class: "webui-open", role: "group", "aria-label": "在 herdr-web-ui 中打开" },
+      buttons.push(h("span", { class: "webui-open", role: "group", "aria-label": t("在 herdr-web-ui 中打开") },
         h("span", { class: "webui-label" }, "herdr-web-ui"),
-        h("button", { class: "btn webui-choice", type: "button", title: "继续同一个 agent：阅读 Markdown 回复和工具记录、发送附件、预览文件。对话功能随 agent 和 herdr-web-ui 版本而异。", onclick: () => openExternal("chat") },
-          "对话 ↗"),
-        h("button", { class: "btn webui-choice", type: "button", title: "继续操作这个终端：搜索历史输出、将选中内容引用到消息；手机可用 Esc、Tab、方向键等快捷按键。", onclick: () => openExternal("terminal") },
-          "终端 ↗"),
+        h("button", { class: "btn webui-choice", type: "button", title: t("继续同一个 agent：阅读 Markdown 回复和工具记录、发送附件、预览文件。对话功能随 agent 和 herdr-web-ui 版本而异。"), onclick: () => openExternal("chat") },
+          t("对话 ↗")),
+        h("button", { class: "btn webui-choice", type: "button", title: t("继续操作这个终端：搜索历史输出、将选中内容引用到消息；手机可用 Esc、Tab、方向键等快捷按键。"), onclick: () => openExternal("terminal") },
+          t("终端 ↗")),
         h("details", { class: "webui-help" },
-          h("summary", { "aria-label": "在 herdr-web-ui 中打开有什么好处", title: "什么时候去 herdr-web-ui？" }, "?"),
+          h("summary", { "aria-label": t("在 herdr-web-ui 中打开有什么好处"), title: t("什么时候去 herdr-web-ui？") }, "?"),
           h("div", { class: "webui-explainer" },
-            h("p", { class: "webui-explainer-title" }, "在同一个 agent 上继续"),
-            h("p", null, h("strong", null, "对话"), "阅读回复和工具记录，发送附件、预览文件。"),
-            h("p", null, h("strong", null, "终端"), "搜索历史、引用选中内容，使用手机快捷按键。"),
-            h("p", { class: "webui-explainer-foot" }, "具体功能随 agent 和 herdr-web-ui 版本而异。")))));
+            h("p", { class: "webui-explainer-title" }, t("在同一个 agent 上继续")),
+            h("p", null, h("strong", null, t("对话")), t("阅读回复和工具记录，发送附件、预览文件。")),
+            h("p", null, h("strong", null, t("终端")), t("搜索历史、引用选中内容，使用手机快捷按键。")),
+            h("p", { class: "webui-explainer-foot" }, t("具体功能随 agent 和 herdr-web-ui 版本而异。"))))));
     }
     return buttons;
   }
@@ -1929,7 +1942,7 @@ function broadcastView(main, id, focusExec) {
     const dot = h("span", { class: "dot" });
     const whoName = h("span", { class: "who-name" });
     const whoKind = h("span", { class: "who-kind" });
-    const renameButton = h("button", { class: "icon-btn rename-agent", type: "button", "aria-label": "修改 agent 名称", title: "修改真实 agent 名称，与 herdr-web-ui 同步", onclick: () => {
+    const renameButton = h("button", { class: "icon-btn rename-agent", type: "button", "aria-label": t("修改 agent 名称"), title: t("修改真实 agent 名称，与 herdr-web-ui 同步"), onclick: () => {
       if (!panel.current.can_rename || savingName) return;
       renameTerminal = panel.current.terminal_id;
       nameInput.value = panel.current.agent_name || "";
@@ -1941,15 +1954,15 @@ function broadcastView(main, id, focusExec) {
     const who = h("span", { class: "who" }, whoKind, whoName, renameButton);
     let savingName = false;
     let renameTerminal = null;
-    const nameInput = h("input", { name: "agent-name", "aria-label": "Agent 名称", maxlength: "32", autocomplete: "off", autocapitalize: "none", spellcheck: "false", placeholder: "例如 frontend 或 reviewer" });
+    const nameInput = h("input", { name: "agent-name", "aria-label": t("Agent 名称"), maxlength: "32", autocomplete: "off", autocapitalize: "none", spellcheck: "false", placeholder: t("例如 frontend 或 reviewer") });
     const nameError = h("span", { class: "rename-error", role: "alert", hidden: true });
     const closeRename = () => {
       if (savingName) return;
       renameForm.hidden = true;
       if (!disposed && !renameButton.disabled) renameButton.focus();
     };
-    const saveName = h("button", { class: "btn primary", type: "submit" }, "保存");
-    const cancelName = h("button", { class: "btn quiet", type: "button", onclick: closeRename }, "取消");
+    const saveName = h("button", { class: "btn primary", type: "submit" }, t("保存"));
+    const cancelName = h("button", { class: "btn quiet", type: "button", onclick: closeRename }, t("取消"));
     const renameForm = h("form", { class: "agent-rename", hidden: true,
       onkeydown: (event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeRename(); } },
       onsubmit: async (event) => {
@@ -1957,7 +1970,7 @@ function broadcastView(main, id, focusExec) {
         if (savingName) return;
         const name = nameInput.value.trim();
         if (!/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
-          nameError.textContent = "以小写字母开头，只能包含小写字母、数字、-、_，最多 32 个字符。";
+          nameError.textContent = t("以小写字母开头，只能包含小写字母、数字、-、_，最多 32 个字符。");
           nameError.hidden = false;
           nameInput.focus();
           return;
@@ -1965,7 +1978,7 @@ function broadcastView(main, id, focusExec) {
         savingName = true;
         nameError.hidden = true;
         nameInput.disabled = saveName.disabled = cancelName.disabled = true;
-        saveName.textContent = "保存中…";
+        saveName.textContent = t("保存中…");
         try {
           const result = await post(`/api/executions/${panel.current.id}/rename`, { name, terminal_id: renameTerminal });
           if (disposed) return;
@@ -1975,21 +1988,21 @@ function broadcastView(main, id, focusExec) {
           renameForm.hidden = true;
           update();
           renameButton.focus();
-          toast(`已改名为 ${result.name}，herdr-web-ui 使用同一名称`);
+          toast(t("已改名为 {0}，herdr-web-ui 使用同一名称", [result.name]));
         } catch (error) {
           if (!disposed) {
-            if (/名称/.test(error.message)) { nameError.textContent = error.message; nameError.hidden = false; }
+            if (/名称|name/i.test(error.message)) { nameError.textContent = error.message; nameError.hidden = false; }
             else { renameForm.hidden = true; try { await refreshConversation(); } catch { /* automatic connection recovery */ } }
           }
         } finally {
           savingName = false;
           nameInput.disabled = saveName.disabled = cancelName.disabled = false;
-          saveName.textContent = "保存";
+          saveName.textContent = t("保存");
           if (!disposed && !renameForm.hidden) nameInput.focus();
         }
       },
     }, h("div", { class: "rename-row" }, nameInput, saveName, cancelName),
-      h("span", { class: "rename-hint" }, "修改真实 agent 名称，与 herdr-web-ui 同步。小写字母开头，最多 32 个字符。"), nameError);
+      h("span", { class: "rename-hint" }, t("修改真实 agent 名称，与 herdr-web-ui 同步。小写字母开头，最多 32 个字符。")), nameError);
     const state = h("span", { class: "state" });
     const identityLabel = h("summary");
     const identityHelp = h("p");
@@ -2001,21 +2014,21 @@ function broadcastView(main, id, focusExec) {
     const directory = h("span", { class: "directory" });
     const where = h("span", { class: "where" }, machineBadge, directory);
     const opensBox = h("span", { class: "opens" });
-    const host = h("div", { class: "terminal-host", "aria-label": "终端：点一下后可以直接输入" });
+    const host = h("div", { class: "terminal-host", "aria-label": t("终端：点一下后可以直接输入") });
     const connection = h("span", { role: "status" });
     const connectionAction = h("button", { class: "btn quiet", type: "button", hidden: true,
       onclick: () => connectionActionFor(panel) });
     const terminalBody = h("div", { class: "terminal-body" }, host);
     const connectionBar = h("div", { class: "terminal-status", hidden: true }, connection, connectionAction);
     const el = h("section", { class: "screen-panel", id: `exec-${e.id}`, "data-exec": String(e.id) });
-    const grow = h("button", { class: "icon-btn", type: "button", "aria-pressed": "false", title: "放大（Esc 恢复）", "aria-label": "放大", html: GROW_ICON, onclick: () => toggleBig(panel) });
+    const grow = h("button", { class: "icon-btn", type: "button", "aria-pressed": "false", title: t("放大（Esc 恢复）"), "aria-label": t("放大"), html: GROW_ICON, onclick: () => toggleBig(panel) });
     // a double click on the head, not the screen: there it selects a word to copy
     const head = h("div", { class: "screen-head", ondblclick: (event) => { if (!event.target.closest("button, details")) toggleBig(panel); } },
       who, h("span", { class: "screen-status" }, dot, state, grow), where, opensBox, identityInfo);
-    const pick = h("input", { type: "checkbox", class: "pick", title: "选择这个 agent，在页面上方继续广播", "aria-label": "选择此 agent 继续广播",
+    const pick = h("input", { type: "checkbox", class: "pick", title: t("选择这个 agent，在页面上方继续广播"), "aria-label": t("选择此 agent 继续广播"),
       onchange: () => { if (pick.checked) picked.add(panel.current.id); else picked.delete(panel.current.id); syncPicked(); } });
-    head.prepend(h("label", { class: "pick-box", title: "选择这个 agent，在页面上方继续广播" }, pick));
-    const typing = h("div", { class: "typing" }, "⌨ 正在输入到这个 agent");
+    head.prepend(h("label", { class: "pick-box", title: t("选择这个 agent，在页面上方继续广播") }, pick));
+    const typing = h("div", { class: "typing" }, t("⌨ 正在输入到这个 agent"));
     const panel = { el, dot, who, whoName, whoKind, renameButton, current: e, state, identityLabel, identityHelp, identityId, connection, connectionAction, connectionBar,
       where, machineName, machineBadge, directory, opensBox, host, terminalBody, grow, pick, typing,
       busy: false, live: false, resumeRequested: false, opensKey: null, recovery: null, recoveryError: null, recoveryKey: null, recoveryAttempts: 0,
@@ -2023,7 +2036,7 @@ function broadcastView(main, id, focusExec) {
     panel.terminal = createBroadcastTerminal(host, e.id,
       (text) => sendTerminalInput(panel.current.id, text),
       (ready) => { panel.live = ready; el.classList.toggle("live", ready); updateTerminalDisplay(panel); maybeRecover(panel); }, screenFont.size);
-    host.addEventListener("focusin", () => { typing.textContent = "⌨ 正在输入到这个 agent　点终端外面结束"; });
+    host.addEventListener("focusin", () => { typing.textContent = t("⌨ 正在输入到这个 agent　点终端外面结束"); });
     el.append(head, renameForm, terminalBody, connectionBar, typing);
     observer.observe(el);
     return panel;
@@ -2048,23 +2061,23 @@ function broadcastView(main, id, focusExec) {
   const followupCount = h("span", { class: "followup-count" });
   const followupTargets = h("div", { class: "followup-targets" });
   const followupResult = h("div", { class: "followup-result", role: "status", hidden: true });
-  const followupInput = h("textarea", { rows: "2", placeholder: "选择下方 agent，输入下一轮任务…", "aria-label": "继续广播的内容",
+  const followupInput = h("textarea", { rows: "2", placeholder: t("选择下方 agent，输入下一轮任务…"), "aria-label": t("继续广播的内容"),
     oninput: () => { const key = draftKey(); if (key) sessionStorage.setItem(key, followupInput.value); syncComposer(); },
     onkeydown: (event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.isComposing) { event.preventDefault(); void sendFollowup(); } },
   });
   draftKey();
-  const followupSend = h("button", { class: "btn primary", type: "submit", disabled: true }, "发送");
-  const followupClear = h("button", { class: "btn quiet followup-clear", type: "button", disabled: true, onclick: () => setPicked([]) }, "清空");
+  const followupSend = h("button", { class: "btn primary", type: "submit", disabled: true }, t("发送"));
+  const followupClear = h("button", { class: "btn quiet followup-clear", type: "button", disabled: true, onclick: () => setPicked([]) }, t("清空"));
   let newPicker;
   const newPickerHost = h("div");
-  const addAgents = h("details", { class: "followup-add" }, h("summary", null, "新增 Agent"), newPickerHost);
+  const addAgents = h("details", { class: "followup-add" }, h("summary", null, t("新增 Agent")), newPickerHost);
   const followupBox = h("form", { class: "followup-composer", onsubmit: (event) => { event.preventDefault(); void sendFollowup(); } },
     h("div", { class: "followup-heading" },
-      h("div", { class: "followup-heading-info" }, h("strong", null, "继续广播"), followupCount),
+      h("div", { class: "followup-heading-info" }, h("strong", null, t("继续广播")), followupCount),
       h("div", { class: "followup-controls" },
-        h("button", { class: "btn quiet", type: "button", "aria-label": "全选 agent", onclick: () => setPicked([...panels.keys()]) }, "全选"), followupClear)),
+        h("button", { class: "btn quiet", type: "button", "aria-label": t("全选 agent"), onclick: () => setPicked([...panels.keys()]) }, t("全选")), followupClear)),
     followupTargets, followupInput, addAgents,
-    h("div", { class: "followup-footer" }, h("span", { class: "followup-shortcut" }, "⌘ / Ctrl + Enter 发送"), followupSend), followupResult);
+    h("div", { class: "followup-footer" }, h("span", { class: "followup-shortcut" }, t("⌘ / Ctrl + Enter 发送")), followupSend), followupResult);
   newPicker = newAgentPicker(syncComposer);
   newPickerHost.append(newPicker.el);
   function setPicked(ids) {
@@ -2078,12 +2091,12 @@ function broadcastView(main, id, focusExec) {
     const blocked = selected.filter(e => !e.can_follow_up);
     followupSend.disabled = followupSending || (!picked.size && !newPicker?.count()) || !followupInput.value.trim() || blocked.length > 0;
     const total = picked.size + (newPicker?.count() || 0);
-    followupSend.textContent = followupSending ? "正在发送…" : total ? `发送给 ${total} 个 agent` : "发送";
+    followupSend.textContent = followupSending ? t("正在发送…") : total ? t("发送给 {0} 个 agent", [total]) : t("发送");
     followupClear.disabled = followupSending || !picked.size;
-    followupInput.placeholder = picked.size ? "输入下一轮任务…" : "选择下方 agent，输入下一轮任务…";
+    followupInput.placeholder = picked.size ? t("输入下一轮任务…") : t("选择下方 agent，输入下一轮任务…");
     followupInput.disabled = followupSending;
     for (const { button } of roundButtons.values()) button.disabled = followupSending;
-    followupCount.textContent = `已有 ${picked.size} 个 · 新增 ${newPicker?.count() || 0} 个`;
+    followupCount.textContent = t("已有 {0} 个 · 新增 {1} 个", [picked.size, newPicker?.count() || 0]);
     const shape = JSON.stringify(selected.map(e => [e.id, e.machine_label, e.agent_name, e.agent_kind]));
     if (shape !== selectionShape) {
       selectionShape = shape;
@@ -2095,7 +2108,7 @@ function broadcastView(main, id, focusExec) {
     for (const [x, p] of panels) {
       p.pick.checked = picked.has(x);
       p.pick.disabled = followupSending;
-      p.pick.title = "选择这个 agent 继续广播";
+      p.pick.title = t("选择这个 agent 继续广播");
       p.el.classList.toggle("picked", picked.has(x));
     }
     syncComposer();
@@ -2118,7 +2131,7 @@ function broadcastView(main, id, focusExec) {
       newPicker.clear();
       followupResult.className = "followup-result";
       selectedRoundId = result.round_id;
-      followupResult.textContent = `第 ${result.round_number} 轮已提交给 ${result.executions} 个 agent，记录保留在本页。`;
+      followupResult.textContent = t("第 {0} 轮已提交给 {1} 个 agent，记录保留在本页。", [result.round_number, result.executions]);
       // A failed refresh must not turn a successful submission into a retryable send failure.
       try { const fresh = await api("/api/state"); if (!disposed) data = fresh; } catch { /* SSE will catch up. */ }
       if (disposed) return;
@@ -2128,7 +2141,7 @@ function broadcastView(main, id, focusExec) {
       followupInput.disabled = false;
       followupInput.focus();
     } catch (error) {
-      if (!disposed) { followupResult.className = "followup-result bad"; followupResult.textContent = "尚未确认提交结果，请查看任务记录。"; followupResult.hidden = false; }
+      if (!disposed) { followupResult.className = "followup-result bad"; followupResult.textContent = t("尚未确认提交结果，请查看任务记录。"); followupResult.hidden = false; }
     } finally { followupSending = false; if (!disposed) { newPicker.lock(false); syncPicked(); } }
   }
 
@@ -2141,7 +2154,7 @@ function broadcastView(main, id, focusExec) {
     catch {
       try { await refreshConversation(); } catch { /* the connection bar owns connection recovery */ }
       const panel = panels.get(execId);
-      if (panel?.live && panel.current.terminal_state === "live") toast("操作结果尚未确认，请查看任务记录。", true);
+      if (panel?.live && panel.current.terminal_state === "live") toast(t("操作结果尚未确认，请查看任务记录。"), true);
     }
   }
 
@@ -2204,10 +2217,10 @@ function broadcastView(main, id, focusExec) {
   function showConnectionDialog(panel, kind, options = []) {
     for (const p of panels.values()) closePanelDialog(p);
     if (!currentPanel(panel)) return;
-    const title = h("h2", null, kind === "new" ? "新建对话" : kind === "choose" ? "选择要继续的对话" : kind === "identity" ? "核对原会话" : "查看终端");
+    const title = h("h2", null, kind === "new" ? t("新建对话") : kind === "choose" ? t("选择要继续的对话") : kind === "identity" ? t("核对原会话") : t("查看终端"));
     const body = h("div", { class: "connection-dialog-body" });
-    const primary = h("button", { class: "btn primary", type: "button" }, kind === "new" ? "新建" : panel.current.manual_session ? "已恢复此会话" : "继续此对话");
-    const cancel = h("button", { class: "btn quiet", type: "button", onclick: () => closePanelDialog(panel) }, "取消");
+    const primary = h("button", { class: "btn primary", type: "button" }, kind === "new" ? t("新建") : panel.current.manual_session ? t("已恢复此会话") : t("继续此对话"));
+    const cancel = h("button", { class: "btn quiet", type: "button", onclick: () => closePanelDialog(panel) }, t("取消"));
     const dialog = h("dialog", { class: "connection-dialog", "aria-label": title.textContent }, title, body,
       h("div", { class: "connection-dialog-actions" }, cancel, primary));
     const native = kind !== "new" && options.length === 0;
@@ -2221,13 +2234,13 @@ function broadcastView(main, id, focusExec) {
       dialog.remove();
     };
     panel.dialog = { el: dialog, kind, native, primary, cleanup };
-    if (kind === "new") body.append(h("p", null, "新对话不包含原对话记录。"));
+    if (kind === "new") body.append(h("p", null, t("新对话不包含原对话记录。")));
     else if (options.length) {
       primary.disabled = true;
       for (const option of options) body.append(h("label", { class: "conversation-option" },
         h("input", { type: "radio", name: `conversation-${panel.current.id}`, onchange: () => { selected = option.terminal_id; primary.disabled = false; } }), option.label));
     } else {
-      if (kind === "identity") body.append(h("p", null, "暂时无法自动核实会话身份。请核对下方是否为原对话，确认后可继续广播；不会重新发送历史任务。"));
+      if (kind === "identity") body.append(h("p", null, t("暂时无法自动核实会话身份。请核对下方是否为原对话，确认后可继续广播；不会重新发送历史任务。")));
       body.append(panel.host);
       panel.terminal.pinned(true);
       primary.hidden = !panel.current.can_confirm_session;
@@ -2268,7 +2281,7 @@ function broadcastView(main, id, focusExec) {
     }
     if (display.action === "settings") {
       sessionStorage.setItem("broadcast.connection-settings", JSON.stringify({ machine: panel.current.machine_label || panel.current.machine_id,
-        reason: panel.current.resume_reason || "请检查这台设备的连接配置。" }));
+        reason: panel.current.resume_reason || t("请检查这台设备的连接配置。") }));
       go("#/machines"); return;
     }
     if (display.action === "new") { showConnectionDialog(panel, "new"); return; }
@@ -2338,8 +2351,8 @@ function broadcastView(main, id, focusExec) {
     panel.el.classList.toggle("big", big);
     panel.grow.innerHTML = big ? SHRINK_ICON : GROW_ICON;
     panel.grow.setAttribute("aria-pressed", String(big));
-    panel.grow.setAttribute("aria-label", big ? "恢复" : "放大");
-    panel.grow.title = big ? "恢复（Esc）" : "放大（Esc 恢复）";
+    panel.grow.setAttribute("aria-label", big ? t("恢复") : t("放大"));
+    panel.grow.title = big ? t("恢复（Esc）") : t("放大（Esc 恢复）");
     if (big) panel.el.scrollIntoView({ block: "nearest" });
   }
 
@@ -2373,40 +2386,40 @@ function broadcastView(main, id, focusExec) {
     panel.current = e;
     panel.renameButton.disabled = !e.can_rename;
     panel.renameButton.hidden = !e.can_rename;
-    panel.renameButton.title = e.can_rename ? "修改真实 agent 名称，与 herdr-web-ui 同步" : "修改名称";
+    panel.renameButton.title = e.can_rename ? t("修改真实 agent 名称，与 herdr-web-ui 同步") : t("修改名称");
     panel.el.classList.toggle("ask", e.agent_status === "blocked");
     panel.el.classList.toggle("inactive", ["closed", "not_started"].includes(e.terminal_state));
     panel.dot.className = `dot ${tone(e.state)}`;
-    const kind = ({ claude: "Claude Code", codex: "Codex", pi: "Pi", opencode: "OpenCode", gemini: "Gemini", custom: "自定义 agent" })[e.agent_kind] || e.agent_kind || "Agent";
+    const kind = ({ claude: "Claude Code", codex: "Codex", pi: "Pi", opencode: "OpenCode", gemini: "Gemini", custom: t("自定义 agent") })[e.agent_kind] || e.agent_kind || "Agent";
     // Use the same real name that Herdr and herdr-web-ui show; do not invent local numbering.
     const title = e.agent_name || kind;
     if (panel.whoName.textContent !== title) panel.whoName.textContent = title;
     if (panel.whoKind.textContent !== kind) panel.whoKind.textContent = kind;
     panel.whoName.hidden = title.toLowerCase() === kind.toLowerCase();
     panel.who.title = [
-      `类型：${kind}`, e.agent_name ? `Agent 名称：${e.agent_name}` : "此 agent 未命名",
-      e.target_kind === "new" ? "来源：为这次广播新建" : "来源：已有会话",
+      t("类型：{0}", [kind]), e.agent_name ? t("Agent 名称：{0}", [e.agent_name]) : t("此 agent 未命名"),
+      e.target_kind === "new" ? t("来源：为这次广播新建") : t("来源：已有会话"),
     ].filter(Boolean).join("\n");
     const activity = e.agent_status ? `　·　Agent ${AGENT_STATUS[e.agent_status] || e.agent_status}` : "";
     panel.state.className = `state c-${tone(e.state)}`;
     const round = findBroadcast(broadcastId())?.rounds?.find(r => r.id === e.round_id);
-    panel.state.textContent = `${round ? `第 ${round.number} 轮` : "最近任务"}：${label(e.state)}${activity}`;
+    panel.state.textContent = `${round ? t("第 {0} 轮", [round.number]) : t("最近任务")}：${label(e.state)}${activity}`;
     const binding = identityPresentation(e);
     panel.identityLabel.textContent = binding.label;
     panel.identityHelp.textContent = binding.help;
     panel.identityId.textContent = e.session_value || "";
     panel.identityId.hidden = !e.session_value;
-    panel.state.title = "广播记录表示发送结果；Agent 状态是当前状态，不能据此判断这条消息是否执行完成。";
+    panel.state.title = t("广播记录表示发送结果；Agent 状态是当前状态，不能据此判断这条消息是否执行完成。");
     const machineName = e.machine_label || e.machine_id;
     if (panel.machineName.textContent !== machineName) panel.machineName.textContent = machineName;
-    panel.machineBadge.title = `所在机器：${machineName}`;
+    panel.machineBadge.title = t("所在机器：{0}", [machineName]);
     const directory = e.cwd ? baseName(e.cwd) : "";
     if (panel.directory.textContent !== directory) panel.directory.textContent = directory;
     panel.directory.hidden = !directory;
     panel.directory.title = e.cwd || "";
     panel.where.title = [
-      `机器：${e.machine_label || e.machine_id}`, e.cwd ? `目录：${e.cwd}` : null,
-      e.workspace_label ? `工作区：${e.workspace_label}` : null, e.pane_id ? `终端：${e.pane_id}` : null,
+      t("机器：{0}", [e.machine_label || e.machine_id]), e.cwd ? t("目录：{0}", [e.cwd]) : null,
+      e.workspace_label ? t("工作区：{0}", [e.workspace_label]) : null, e.pane_id ? t("终端：{0}", [e.pane_id]) : null,
     ].filter(Boolean).join("\n");
     // its machine not answering says more than any state it had
     const down = !!e.pane_id && machineDown(e.machine_id);
@@ -2439,7 +2452,7 @@ function broadcastView(main, id, focusExec) {
       titleEl.textContent = "";
       actions.replaceChildren();
       actionsFor = null;
-      body.replaceChildren(h("p", { class: "empty-note" }, loaded ? "这条广播已被删除。" : "读取中…"));
+      body.replaceChildren(h("p", { class: "empty-note" }, loaded ? t("这条广播已被删除。") : t("读取中…")));
       return;
     }
     const b = broadcastRound(broadcast, selectedRoundId, focused ? null : focusExec);
@@ -2448,7 +2461,7 @@ function broadcastView(main, id, focusExec) {
     if (selectedRoundId === null) selectedRoundId = b.round?.id ?? null;
     if (!body.contains(wall)) body.replaceChildren(roundContext, followupBox, summary, hint, wall);
     roundHistory.hidden = (broadcast.rounds?.length || 1) <= 1;
-    roundHeading.textContent = "轮次";
+    roundHeading.textContent = t("轮次");
     for (const round of broadcast.rounds || []) {
       let entry = roundButtons.get(round.id);
       if (!entry) {
@@ -2463,8 +2476,8 @@ function broadcastView(main, id, focusExec) {
         roundButtons.set(round.id, entry);
         roundList.append(button);
       }
-      entry.name.textContent = `第 ${round.number} 轮`;
-      entry.button.title = `查看第 ${round.number} 轮任务输入`;
+      entry.name.textContent = t("第 {0} 轮", [round.number]);
+      entry.button.title = t("查看第 {0} 轮任务输入", [round.number]);
       entry.button.classList.toggle("current", round.id === b.round?.id);
       entry.button.setAttribute("aria-pressed", String(round.id === b.round?.id));
       entry.button.disabled = followupSending;
@@ -2504,14 +2517,14 @@ function broadcastView(main, id, focusExec) {
       promptText.textContent = b.prompt;
       promptText.scrollTop = 0;
     }
-    roundLabel.textContent = `第 ${b.round?.number || 1} 轮`;
-    metaText.textContent = `${b.total} 个 agent · ${ago(b.created_at)}发出`;
+    roundLabel.textContent = t("第 {0} 轮", [b.round?.number || 1]);
+    metaText.textContent = t("{0} 个 agent · {1}发出", [b.total, ago(b.created_at)]);
     hint.hidden = !data.webUi.running && !data.webUi.installed;
     const hintText = "" + (data.webUi.running
-      ? "勾选 agent 后可在上方继续广播；直接操作终端只影响当前 agent。细读回复、发附件或搜索历史，可进入 herdr-web-ui。"
+      ? t("勾选 agent 后可在上方继续广播；直接操作终端只影响当前 agent。细读回复、发附件或搜索历史，可进入 herdr-web-ui。")
       : data.webUi.installed
-        ? "启动 herdr-web-ui 后，可从卡片右上角继续同一个 agent：在对话视图读回复、发附件，或在终端视图搜索历史、引用内容。"
-        : "安装 herdr-web-ui，可在同一个 agent 上使用对话阅读、附件、文件预览和终端历史搜索。");
+        ? t("启动 herdr-web-ui 后，可从卡片右上角继续同一个 agent：在对话视图读回复、发附件，或在终端视图搜索历史、引用内容。")
+        : t("安装 herdr-web-ui，可在同一个 agent 上使用对话阅读、附件、文件预览和终端历史搜索。"));
     if (hint.textContent !== hintText) hint.textContent = hintText;
     renderSummary({ executions: agents });
     syncPicked();
@@ -2527,14 +2540,14 @@ function broadcastView(main, id, focusExec) {
       actionsFor = shape;
       actions.replaceChildren(...[
         // an unsent draft in the form would be replaced: that takes a second press
-        confirmButton("另建广播", "再点一次覆盖草稿", async () => rebroadcast(broadcastRound(findBroadcast(b.id) || b, selectedRoundId)),
-          { class: "btn quiet", title: "用本轮指令和参与的 agent 新建独立广播，发之前可以修改" },
+        confirmButton(t("另建广播"), t("再点一次覆盖草稿"), async () => rebroadcast(broadcastRound(findBroadcast(b.id) || b, selectedRoundId)),
+          { class: "btn quiet", title: t("用本轮指令和参与的 agent 新建独立广播，发之前可以修改") },
           () => { const draft = loadDraft(); return !!(draft.prompt || "").trim() && draft.prompt !== b.prompt; }),
-        confirmButton("删除记录", "再点一次删除", async () => {
+        confirmButton(t("删除记录"), t("再点一次删除"), async () => {
           await api(`/api/broadcasts/${b.id}`, { method: "DELETE" });
-          toast("已删除");
+          toast(t("已删除"));
           go("");
-        }, { class: "btn quiet", title: "仅删除历史记录；不会撤回已发送的消息，也不会关闭 agent 或 pane" }),
+        }, { class: "btn quiet", title: t("仅删除历史记录；不会撤回已发送的消息，也不会关闭 agent 或 pane") }),
       ].filter(Boolean));
     }
   }
@@ -2557,22 +2570,22 @@ function broadcastView(main, id, focusExec) {
 function identityPresentation(e) {
   const check = e.identity_check;
   const reasons = {
-    report_timeout: "本轮等待已结束，期间未收到原生会话标识。",
-    proof_timeout: "已收到原生会话标识，但在等待期限内未能核实本轮输入。",
-    unsupported: "此 agent 尚不支持延迟身份的自动核验，请人工核对会话。",
-    unavailable: "已收到原生会话标识，但无法读取对应会话记录完成核验。",
-    changed: "核验期间终端或会话身份不一致，未自动绑定。",
-    cancelled: "本轮身份核验已中断，可人工核对当前会话。",
+    report_timeout: t("本轮等待已结束，期间未收到原生会话标识。"),
+    proof_timeout: t("已收到原生会话标识，但在等待期限内未能核实本轮输入。"),
+    unsupported: t("此 agent 尚不支持延迟身份的自动核验，请人工核对会话。"),
+    unavailable: t("已收到原生会话标识，但无法读取对应会话记录完成核验。"),
+    changed: t("核验期间终端或会话身份不一致，未自动绑定。"),
+    cancelled: t("本轮身份核验已中断，可人工核对当前会话。"),
   };
   let reason = reasons[check?.state] || "";
-  if (check?.state === "unavailable" && !check.reported_at) reason = "无法读取终端的会话上报，请人工核对。";
-  if (check?.state === "unavailable" && check.reason === "read_limit") reason = "已收到原生会话标识，但对应会话记录超过读取限制，未完成核验。";
-  if (["waiting_report", "verifying"].includes(check?.state) && e.identity_state !== "pending") reason = "上次身份核验未完成；服务不会自动重试，可人工核对当前会话。";
-  const suffix = reason + "关闭浏览器标签不会停止 agent；再次打开可连接仍在运行的终端。";
-  if (e.session_value) return { label: "已绑定原生会话", help: `已保存原生会话标识。即使 agent 进程退出，只要原机器上的历史仍在，点击继续对话即可按此标识恢复。${suffix}` };
-  if (e.identity_state === "pending") return { label: "正在核验原生会话", help: `本轮已提交，${check?.reported_at ? "已收到标识，正在核验对应会话记录" : "正在等待会话标识上报"}；发送成功不等于绑定成功。${suffix}` };
-  if (e.identity_state === "manual") return { label: "人工确认的终端 · 未绑定原生会话", help: `当前按你的确认使用此终端，尚未保存原生会话 ID。进程退出或服务重启后需要重新核对，可能需要手动选择历史；进程内切换会话后也请重新绑定。${suffix}` };
-  return { label: "尚未绑定原生会话", help: `安装集成用于让 agent 上报会话标识，安装成功并不表示此会话已绑定。请在终端完成 hooks 信任并返回输入框；仍无法取得标识时可人工核对。关闭 agent 进程后，可能需要手动选择历史。${suffix}` };
+  if (check?.state === "unavailable" && !check.reported_at) reason = t("无法读取终端的会话上报，请人工核对。");
+  if (check?.state === "unavailable" && check.reason === "read_limit") reason = t("已收到原生会话标识，但对应会话记录超过读取限制，未完成核验。");
+  if (["waiting_report", "verifying"].includes(check?.state) && e.identity_state !== "pending") reason = t("上次身份核验未完成；服务不会自动重试，可人工核对当前会话。");
+  const suffix = reason + t("关闭浏览器标签不会停止 agent；再次打开可连接仍在运行的终端。");
+  if (e.session_value) return { label: t("已绑定原生会话"), help: t("已保存原生会话标识。即使 agent 进程退出，只要原机器上的历史仍在，点击继续对话即可按此标识恢复。{0}", [suffix]) };
+  if (e.identity_state === "pending") return { label: t("正在核验原生会话"), help: t("本轮已提交，{0}；发送成功不等于绑定成功。{1}", [check?.reported_at ? t("已收到标识，正在核验对应会话记录") : t("正在等待会话标识上报"), suffix]) };
+  if (e.identity_state === "manual") return { label: t("人工确认的终端 · 未绑定原生会话"), help: t("当前按你的确认使用此终端，尚未保存原生会话 ID。进程退出或服务重启后需要重新核对，可能需要手动选择历史；进程内切换会话后也请重新绑定。{0}", [suffix]) };
+  return { label: t("尚未绑定原生会话"), help: t("安装集成用于让 agent 上报会话标识，安装成功并不表示此会话已绑定。请在终端完成 hooks 信任并返回输入框；仍无法取得标识时可人工核对。关闭 agent 进程后，可能需要手动选择历史。{0}", [suffix]) };
 }
 
 // ---- wiring -----------------------------------------------------------------------------
@@ -2582,7 +2595,7 @@ function connect() {
   // the build this page's script came with: a server restarted on other files serves another script
   let served = null;
   source.onmessage = (event) => {
-    data = JSON.parse(event.data);
+    data = BroadcastI18n.metadata(JSON.parse(event.data));
     const build = data.build;
     if (build && served && build !== served) return location.reload();
     if (build) served = build;
@@ -2641,6 +2654,7 @@ addEventListener("keydown", (event) => {
 });
 // relative times move without new data
 setInterval(() => { renderSidebar(); if (view && parseRoute().name === "broadcast") view.update(); }, 30000);
+BroadcastI18n.applyStatic();
 renderNotify();
 
 api("/api/config").then((c) => { config = c; }).catch(() => {}).finally(() => { route(); connect(); });

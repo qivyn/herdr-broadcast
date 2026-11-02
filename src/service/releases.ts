@@ -64,7 +64,7 @@ export async function validateStage(stage: string, run: Run = runCommand, step: 
   // A local snapshot initially carries old browser assets; resolve the newly installed dependencies.
   rmSync(join(stage, "src/web/vendor"), { recursive: true, force: true });
   const assets = JSON.parse(await checked(run, [process.execPath, "src/service/entry.ts", "assets"], stage)) as { name: string; path: string }[];
-  for (const f of ["package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "src/web/page.html", "src/web/page.js", "src/web/terminal.js", "src/web/icon.svg"]) if (!statSync(join(stage, f)).isFile()) throw new Error(`Missing resource ${f}`);
+  for (const f of ["package.json", "bun.lock", "tsconfig.json", "herdr-plugin.toml", "src/web/page.html", "src/web/page.js", "src/web/i18n.js", "src/web/terminal.js", "src/web/icon.svg"]) if (!statSync(join(stage, f)).isFile()) throw new Error(`Missing resource ${f}`);
   mkdirSync(join(stage, "src/web/vendor"), { recursive: true });
   for (const a of assets) { const dest = join(stage, "src/web/vendor", a.name); if (resolve(a.path) !== resolve(dest)) cpSync(a.path, dest); }
 }

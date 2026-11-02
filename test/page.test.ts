@@ -241,9 +241,19 @@ test("normal connections do not steal focus, and another user action cancels pen
 
 const pageScript = readFileSync(new URL("../src/web/page.js", import.meta.url), "utf8");
 
+const i18nSource = readFileSync(new URL("../src/web/i18n.js", import.meta.url), "utf8");
+const zhI18n = runInNewContext(i18nSource + "\nBroadcastI18n", { localStorage: { getItem: () => "zh-CN" } });
+function runPage(source: string, globals: any = {}) { return runInNewContext(source, { t: zhI18n.t, BroadcastI18n: zhI18n, ...globals }); }
+function pageLanguage(language: string, storage: Map<string, string>) {
+  if (!storage.has("broadcast.language")) storage.set("broadcast.language", language);
+  return runInNewContext(i18nSource + "\nBroadcastI18n", { localStorage: {
+    getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value),
+  } });
+}
+
 function pageFunction(name: string, end: string, globals: object = {}) {
   const start = pageScript.indexOf(`  function ${name}(`);
-  return runInNewContext(pageScript.slice(start, pageScript.indexOf(end, start)) + `\n${name}`, globals);
+  return runPage(pageScript.slice(start, pageScript.indexOf(end, start)) + `\n${name}`, globals);
 }
 
 /** Execute the real composer's selection, refresh and submission code at its API boundary. */
@@ -261,7 +271,7 @@ function composerHarness(post: (path: string, body: any) => Promise<any>) {
     post: (path: string, body: any) => { sent.push({ path, body }); return post(path, body); },
     toast: (message: string) => notices.push(message), go: (hash: string) => navigation.push(hash),
   };
-  const view = runInNewContext(source + "\nnewView", globals)({ append() {} });
+  const view = runPage(source + "\nnewView", globals)({ append() {} });
   view.submit = () => button.onclick();
   return { view, storage, sent, navigation, notices, prompt: elements.find(e => e.tag === "textarea"), title: elements.find(e => e.tag === "input"), send: button };
 }
@@ -320,7 +330,7 @@ test("terminal keystrokes never broadcast to other checked cards", () => {
 test("round selection shows only that round, defaults to latest and follows execution deep links", () => {
   const start = pageScript.indexOf("function broadcastRound(");
   const end = pageScript.indexOf("/**\n * `id`:", start);
-  const scope = runInNewContext(pageScript.slice(start, end) + "\nbroadcastRound");
+  const scope = runPage(pageScript.slice(start, end) + "\nbroadcastRound");
   const b = { id: 7, title: "same broadcast", prompt: "first", executions: [
     { id: 10, round_id: 1 }, { id: 11, round_id: 1 }, { id: 12, round_id: 2 },
   ], rounds: [
@@ -336,7 +346,7 @@ test("round selection shows only that round, defaults to latest and follows exec
 });
 
 // A small DOM stand-in runs the actual detail-view lifecycle without a browser or real terminals.
-function detailHarness(options: { active?: boolean; setup?: (b: any) => void; post?: (path: string, body: any) => Promise<any>; api?: (path: string) => Promise<any>;
+function detailHarness(options: { language?: string; active?: boolean; setup?: (b: any) => void; post?: (path: string, body: any) => Promise<any>; api?: (path: string) => Promise<any>;
   /** opened as #/e/<id>, before the state has arrived */
   deepLink?: number } = {}) {
   class Element {
@@ -391,7 +401,9 @@ function detailHarness(options: { active?: boolean; setup?: (b: any) => void; po
   const terminals = new Map<number, any>();
   const timers = new Map<number, { fn: () => void; due: number }>();
   let now = 0, timerSeq = 0, arrived = options.deepLink === undefined;
+  const translations = pageLanguage(options.language || "zh-CN", new Map());
   const globals = {
+    t: translations.t, BroadcastI18n: translations,
     newAgentPicker: () => ({ el: h("section", { class: "test-new-picker" }), count: () => pendingNew.reduce((n, p) => n + p.count, 0), specs: () => [...pendingNew], refresh() {}, lock() {}, clear() { pendingNew = []; }, dispose() {} }),
     h, data, loaded: true, config: { local: false }, SUMMARY: [], AGENT_STATUS: { working: "工作中", idle: "空闲", blocked: "等待确认" }, SHOWN: ["live", "restoring", "starting", "shell"], screenFont: { size: 14, normal: 14 }, GROW_ICON: "", SHRINK_ICON: "",
     document: { hidden: false, addEventListener() {}, removeEventListener() {} },
@@ -403,7 +415,7 @@ function detailHarness(options: { active?: boolean; setup?: (b: any) => void; po
     topbar: (...children: any[]) => h("div", {}, ...children),
     findBroadcast: (id: number | null) => (arrived && id === b.id ? b : null),
     findExec: (id: number) => (arrived ? { b, e: b.executions.find(e => e.id === id) } : null),
-    machineDown: () => false, tone: () => "ok", label: (s: string) => s, ago: () => "刚刚", duration: () => "", baseName: (s: string) => s,
+    machineDown: () => false, tone: () => "ok", label: (s: string) => s, ago: () => translations.t("刚刚"), duration: () => "", baseName: (s: string) => s,
     confirmButton: (text: string, _confirm: string, act: () => Promise<void>) => h("button", { onclick: act }, text),
     PREFILL_KEY: "broadcast.prefill",
     sessionStorage: { getItem: (key: string) => stored.get(key), setItem: (key: string, value: string) => stored.set(key, value), removeItem: (key: string) => stored.delete(key) },
@@ -427,7 +439,7 @@ function detailHarness(options: { active?: boolean; setup?: (b: any) => void; po
   };
   const start = pageScript.indexOf("function connectionPresentation(");
   const end = pageScript.indexOf("// ---- wiring", start);
-  const create = runInNewContext(pageScript.slice(start, end) + "\nbroadcastView", globals);
+  const create = runPage(pageScript.slice(start, end) + "\nbroadcastView", globals);
   const view = options.deepLink === undefined ? create(main, 7, null) : create(main, null, options.deepLink);
   return { main, b, data, requests, operations, terminals, navigation, stored, one, all, entries, view, timers,
     addNew(spec: any) { pendingNew.push(spec); view.update(); },
@@ -637,7 +649,7 @@ test("confirmed actions cannot submit again while the first request is pending",
   const button = { disabled: false, textContent: "send", classList: { add() {}, remove() {} }, addEventListener: (key: string, fn: () => Promise<void>) => events.set(key, fn) };
   let release!: () => void, calls = 0;
   const pending = new Promise<void>(resolve => { release = resolve; });
-  const create = runInNewContext(pageScript.slice(start, end) + "\nconfirmButton", { h: () => button, setTimeout: () => 1, clearTimeout() {}, toast() {} });
+  const create = runPage(pageScript.slice(start, end) + "\nconfirmButton", { h: () => button, setTimeout: () => 1, clearTimeout() {}, toast() {} });
   create("send", "confirm", async () => { calls++; await pending; }, {});
   await events.get("click")!();
   const request = events.get("click")!();
@@ -964,7 +976,7 @@ test("clicking the blank terminal body can recover ownership while the old scree
 });
 
 /** The real machines page and sidebar update chip, on a small DOM stand-in. */
-function machinesHarness(options: { webUi?: { installed: boolean; running: boolean }; local?: boolean; update?: any; machines?: any[]; settings?: boolean; newBroadcast?: boolean; api?: (path: string) => Promise<any>; environmentOperations?: any[]; storage?: Map<string, string>; post?: (path: string, body: any) => Promise<any>; hidden?: boolean } = {}) {
+function machinesHarness(options: { language?: string; webUi?: { installed: boolean; running: boolean }; local?: boolean; update?: any; machines?: any[]; settings?: boolean; newBroadcast?: boolean; api?: (path: string) => Promise<any>; environmentOperations?: any[]; storage?: Map<string, string>; post?: (path: string, body: any) => Promise<any>; hidden?: boolean } = {}) {
   class Element {
     children: Element[] = []; parent?: Element; className = ""; text = ""; value = "";
     disabled = false; hidden = false; attrs: Record<string, any> = {}; dataset: Record<string, any> = {}; events: Record<string, Function> = {};
@@ -1023,7 +1035,10 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
   const reloads: number[] = [];
   const timers: (() => void)[] = [];
   let serverInstance = "old";
+  const translations = pageLanguage(options.language || "zh-CN", storage);
+  if (options.language === "en") Object.assign(data, translations.metadata(data));
   const globals: any = {
+    t: translations.t, BroadcastI18n: translations,
     h, data, loaded: true, DRAFT_KEY: "draft", PREFILL_KEY: "prefill", config: { local: options.local ?? true, kinds: ["claude", "codex"] }, view: null, document: { activeElement: null, body, hidden: options.hidden ?? false },
     $: (id: string) => (id === "update-box" ? updateBox : null),
     sessionStorage: { getItem: () => null, removeItem() {} },
@@ -1031,7 +1046,7 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
     go() {},
     autogrow: (el: Element) => el, sendButton: (attrs: any) => h("button", { class: "send", ...attrs }),
     topbar: (...children: any[]) => h("div", {}, ...children),
-    machineDown: () => false, ago: () => "刚刚", toast: (t: string) => toasts.push(t), ACTIVE: [],
+    machineDown: () => false, ago: () => translations.t("刚刚"), toast: (t: string) => toasts.push(t), ACTIVE: [],
     api: async (path: string) => options.api ? options.api(path) : (path.includes("health") ? { health: {}, at: 1 } : { file: null, machines: [] }),
     post: async (path: string, body: any) => {
       requests.push({ path, body });
@@ -1047,10 +1062,10 @@ function machinesHarness(options: { webUi?: { installed: boolean; running: boole
   const run = (from: string, to: string) => pageScript.slice(pageScript.indexOf(from), pageScript.indexOf(to));
   const source = [run("function confirmButton(", "function webUiBase("), run("const WEB_UI_REPO", "/** Whether the reader has text selected"),
     run("function loadDraft()", "// ---- settings:"), run("function settingsView(main)", "// ---- machines:"), run("function showAgentPreparation(", "function sameHerdr("), run("function machinesView(main)", "// ---- a broadcast: its prompt")].join("\n");
-  const scope = runInNewContext(`${source}\n({ machinesView, settingsView, newView, renderUpdate, showAgentPreparation })`, globals);
+  const scope = runPage(`${source}\n({ machinesView, settingsView, newView, renderUpdate, showAgentPreparation })`, globals);
   const view = options.newBroadcast ? scope.newView(main) : options.settings ? scope.settingsView(main) : scope.machinesView(main);
   return { main, body, updateBox, data, view, requests, toasts, reloads, all, storage, document: globals.document,
-    openPreparation(snapshot: any, options: any = {}, machine: any = { id: "local", label: "Local test" }) { scope.showAgentPreparation(machine, snapshot, options); }, renderUpdate: scope.renderUpdate,
+    openPreparation(snapshot: any, options: any = {}, machine: any = { id: "local", label: "Local test" }) { scope.showAgentPreparation(machine, translations.metadata(snapshot), options); }, renderUpdate: scope.renderUpdate,
     advance(ms: number) { now += ms; }, notice: () => body.children.find(e => e.classList.contains("update-notice")),
     restartServer() { serverInstance = "new"; }, async pollRestart() { const next = timers.shift(); next?.(); await Bun.sleep(0); },
     text: () => main.textContent, buttons: (label: string) => all(main).filter(e => e.tag === "button" && e.textContent === label) };
@@ -1172,7 +1187,7 @@ describe("settings navigation", () => {
   });
   test("page top bars contain only their own navigation and actions", () => {
     const source = pageScript.slice(pageScript.indexOf("function topbar("), pageScript.indexOf("// ---- sidebar, title and notifications"));
-    const topbar = runInNewContext(`${source}\ntopbar`, {
+    const topbar = runPage(`${source}\ntopbar`, {
       h: (tag: string, attrs: any, ...children: any[]) => ({ tag, attrs, children: children.flat() }), go() {},
     });
     expect(topbar("title", "actions").children).toHaveLength(3);
@@ -1578,6 +1593,60 @@ test("the shared picker sends custom specs without writing the startup command i
   expect(h.toasts).toEqual([]);
 });
 
+
+test("English new-broadcast controls submit original Chinese prompts, names and commands", async () => {
+  const h = machinesHarness({ language: "en", newBroadcast: true, post: async () => ({ id: 3, executions: 1 }) });
+  const field = (label: string) => h.all(h.main).find(e => e.attrs["aria-label"] === label)!;
+  expect(h.main.textContent).toContain("One task, multiple rounds");
+  field("Choose a custom command").events.click!();
+  field("New Agent working directory").value = "/repo";
+  field("Custom Agent name").value = "设置";
+  field("Custom startup command").value = "offline-agent --name='测试'";
+  await h.buttons("Add Agent")[0]!.events.click!();
+  const prompt = field("Broadcast instruction"); prompt.value = "发送中：请审查这段代码"; prompt.events.input!();
+  field("Broadcast title").value = "新建广播";
+  await h.all(h.main).find(e => e.classList.contains("send"))!.events.click!();
+  expect(h.requests).toEqual([{ path: "/api/broadcasts", body: { title: "新建广播", prompt: "发送中：请审查这段代码", new: [
+    { machine: "local", kind: "custom", cwd: "/repo", count: 1, command: "offline-agent --name='测试'", label: "设置" },
+  ] } }]);
+});
+
+test("English settings persist the language and reload only the browser without restarting or sending", () => {
+  const draft = JSON.stringify({ prompt: "未提交的中文草稿", title: "设置" });
+  const storage = new Map([["draft", draft]]);
+  const h = machinesHarness({ language: "en", settings: true, storage });
+  expect(h.main.textContent).toContain("Language");
+  expect(h.buttons("English")[0]!.attrs["aria-pressed"]).toBe("true");
+  h.buttons("简体中文")[0]!.events.click!();
+  expect(storage.get("broadcast.language")).toBe("zh-CN"); expect(storage.get("draft")).toBe(draft);
+  expect(h.reloads).toEqual([1]); expect(h.requests).toEqual([]);
+  const reloaded = machinesHarness({ language: "en", settings: true, storage });
+  expect(reloaded.main.textContent).toContain("插件版本");
+  expect(reloaded.buttons("简体中文")[0]!.attrs["aria-pressed"]).toBe("true");
+});
+
+test("English component management identifies its machine and keeps setup actions understandable", () => {
+  const h = machinesHarness({ language: "en", settings: true });
+  h.openPreparation(preparationSnapshot());
+  const dialog = h.body.children.find(e => e.tag === "dialog")!;
+  expect(dialog.textContent).toContain("Agent components on Local test");
+  expect(dialog.textContent).toContain("Install selected components");
+  expect(dialog.textContent).toContain("Session components");
+  expect(dialog.textContent).not.toMatch(/\p{Script=Han}/u);
+});
+
+test("English conversation cards preserve Chinese user titles and input while localizing recovery controls", () => {
+  const h = detailHarness({ language: "en", setup: b => {
+    b.title = "新建广播"; b.prompt = "发送中";
+    b.rounds.forEach((r: any) => { r.prompt = "发送中"; });
+    b.executions.forEach((e: any) => { e.agent_name = "设置"; e.custom_startup_pending = true; });
+  } });
+  expect(h.main.textContent).toContain("新建广播");
+  expect(h.main.textContent).toContain("设置");
+  expect(h.main.textContent).toContain("发送中");
+  expect(h.main.textContent).toContain("Ready in a new conversation; send this round");
+  expect(h.requests).toEqual([]); h.view.dispose();
+});
 
 describe("new version notice", () => {
   const update = () => ({ kind: "github", mode: "installed", available: true, phase: "idle", current_version: "0.3.0", current_revision: "a".repeat(40), latest_version: "0.3.1", latest_revision: "b".repeat(40), blocked_reason: null });

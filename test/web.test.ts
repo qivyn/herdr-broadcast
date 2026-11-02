@@ -53,6 +53,20 @@ afterEach(async () => {
 });
 
 describe("web page", () => {
+  test("serves the bundled language catalogue before the page code with the same authentication and no cache", async () => {
+    start("test-language-token");
+    expect((await fetch(base + "/i18n.js")).status).toBe(401);
+    const headers = { authorization: "Bearer test-language-token" };
+    const response = await fetch(base + "/i18n.js", { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("javascript");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const language = await response.text();
+    expect(language).toContain("BroadcastI18n"); expect(language).toContain("Ready in a new conversation; send this round");
+    const html = await (await fetch(base, { headers })).text();
+    expect(html.indexOf('src="/i18n.js"')).toBeLessThan(html.indexOf('src="/page.js"'));
+    expect(html).toContain('data-i18n="新建广播"');
+  });
   test("card rename changes Herdr's real agent name on its machine and keeps shared records in sync", async () => {
     fake.addMachine("m-1", "remote");
     const agent = fake.addAgent("m-1", "pi", "done", "bc10-pi-1");
