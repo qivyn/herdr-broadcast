@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../src/db.ts";
-import { detectWebUi, snapshot, startWebServer } from "../src/web/server.ts";
+import { detectWebUi, snapshot, startWebServer, executionsFrom } from "../src/web/server.ts";
 import { FakeHerdr, until } from "./helpers.ts";
 
 let fake: FakeHerdr;
@@ -32,6 +32,14 @@ function identifyHistory(broadcastId: number) {
 /** A request as the page itself sends it: same origin. */
 const send = (path: string, body: unknown, method = "POST") =>
   fetch(`${base}${path}`, { method, headers: { "content-type": "application/json", origin: base, "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) });
+
+// Legacy histories remain usable; seed them directly instead of using the retired create API.
+async function submitLegacy(prompt: string, targets: any[]) {
+  for (const id of new Set(targets.map(t => t.machine))) await web.engine.refresh(id);
+  const id = store.createBroadcast({ title: prompt, prompt, executions: executionsFrom({ targets }, web.engine) });
+  web.engine.submit(store.rounds(id)[0]!.id);
+  return new Response(JSON.stringify({ id }), { status: 200 });
+}
 
 beforeEach(() => {
   fake = new FakeHerdr();
@@ -109,12 +117,12 @@ describe("web page", () => {
   });
 
   test("a broadcast from the form reaches an idle agent", async () => {
-    const agent = fake.addAgent("local", "claude");
     start();
-    const response = await send("/api/broadcasts", { prompt: "从网页发的", targets: [{ machine: "local", pane: agent.pane_id, terminal_id: agent.terminal_id }] });
+    const response = await send("/api/broadcasts", { prompt: "从网页发的", new: [{ machine: "local", kind: "claude", cwd: fake.dir }] });
     expect(response.status).toBe(200);
     const { id } = (await response.json()) as { id: number };
     await until(() => store.executions(id)[0]?.state === "sent", 8000, "sent");
+    const agent = fake.server().agents[0]!;
     expect(fake.server().prompts).toEqual([{ pane_id: agent.pane_id, text: "从网页发的" }]);
 
     const state = (await (await fetch(`${base}/api/state`)).json()) as { state: { broadcasts: { id: number; executions: { web_link: string }[] }[] } };
@@ -138,11 +146,12 @@ describe("web page", () => {
       expect(fake.server().prompts).toEqual([]);
     }
     // The UI exposes the same identity that its checkbox must preserve until submission.
+    await web.engine.refresh("local");
     const state = await (await fetch(`${base}/api/state`)).json() as any;
     expect(state.agents[0].agents[0]).toMatchObject({ terminal_id: agent.terminal_id, session_kind: "id", session_value: value });
-    expect((await send("/api/broadcasts", { prompt: "send to the chosen conversation", targets: [selected] })).status).toBe(200);
-    await until(() => store.executions(1)[0]?.state === "sent");
-    expect(fake.server().prompts).toEqual([{ pane_id: agent.pane_id, text: "send to the chosen conversation" }]);
+    expect((await send("/api/broadcasts", { prompt: "send to the chosen conversation", targets: [selected] })).status).toBe(400);
+    expect(store.listBroadcasts()).toEqual([]);
+    expect(fake.server().prompts).toEqual([]);
   });
 
   test("new agents in the form are checked: a remote folder must be absolute or ~", async () => {
@@ -251,7 +260,7 @@ describe("web page", () => {
     const agent = fake.addAgent("local", "claude");
     fake.mutate(s => { s.servers.local!.agents[0]!.agent_session = { agent: "claude", kind: "id", source: "test", value: crypto.randomUUID() }; });
     start();
-    const { id } = (await (await send("/api/broadcasts", { prompt: "第一轮", targets: [{ machine: "local", pane: agent.pane_id, terminal_id: agent.terminal_id }] })).json()) as { id: number };
+    const { id } = (await (await submitLegacy("第一轮", [{ machine: "local", pane: agent.pane_id, terminal_id: agent.terminal_id }])).json()) as { id: number };
     await until(() => store.executions(id)[0]?.state === "sent", 8000, "sent");
     const exec = store.executions(id)[0]!.id;
     expect((await send(`/api/executions/${exec}/input`, { text: "接着做第二步", submit: true })).status).toBe(200);
@@ -449,7 +458,7 @@ test("interrupt API rejects stale identity and cross-site requests without chang
 
 test("unknown delivery history cannot follow up, retry or interrupt a later session until explicitly confirmed", async () => {
   const a = fake.addAgent("local", "claude", "idle"); start();
-  const response = await send("/api/broadcasts", { prompt: "original", targets: [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }] });
+  const response = await submitLegacy("original", [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }]);
   const { id } = await response.json() as { id: number };
   await until(() => store.executions(id)[0]?.state === "sent");
   const original = store.executions(id)[0]!;

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { FakeHerdr, until } from "./helpers.ts";
 import { Store } from "../src/db.ts";
-import { startWebServer } from "../src/web/server.ts";
+import { executionsFrom, startWebServer } from "../src/web/server.ts";
 import { sameProcess } from "../src/manual-session.ts";
 
 let fake: FakeHerdr, store: Store, web: ReturnType<typeof startWebServer> | undefined;
@@ -10,6 +10,11 @@ afterEach(async () => { await web?.stop(); web = undefined; store.close(); fake.
 async function post(path: string, body: unknown = {}) {
   const base = web!.url.replace(/\/$/, "");
   return fetch(base + path, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify(body) });
+}
+async function legacySubmit(prompt: string, target: any) {
+  await web!.engine.refresh("local");
+  const id = store.createBroadcast({ title: "legacy", prompt, executions: executionsFrom({ targets: [target] }, web!.engine) });
+  web!.engine.submit(store.rounds(id)[0]!.id); return id;
 }
 async function setup() {
   const agent = fake.addAgent("local", "unrecognized"); fake.removeAgent("local", agent.pane_id);
@@ -23,9 +28,7 @@ test("unrecognized terminal requires explicit binding, sends through raw input, 
   const target = { machine: "local", pane: a.pane_id, terminal_id: a.terminal_id, manual: true };
   expect((await post("/api/broadcasts", { prompt: "one", targets: [target] })).ok).toBe(false);
   expect((await post("/api/machines/local/manual-binding", target)).ok).toBe(true);
-  const submitted = await post("/api/broadcasts", { prompt: "one", targets: [target] });
-  expect(submitted.ok).toBe(true);
-  const { id } = await submitted.json() as any;
+  const id = await legacySubmit("one", target);
   await until(() => store.executions(id)[0]!.state === "sent");
   const e = store.executions(id)[0]!;
   expect(e.session_value).toBeNull(); expect(e.agent_kind).toBe("custom");
@@ -73,9 +76,7 @@ test("exit after paste preserves uncertainty and never sends Enter to the shell"
   const target = { machine: "local", pane: a.pane_id, terminal_id: a.terminal_id, manual: true };
   expect((await post("/api/machines/local/manual-binding", target)).ok).toBe(true);
   fake.mutate(s => { s.servers.local!.exitAfterPaste = true; });
-  const response = await post("/api/broadcasts", { prompt: "partial input", targets: [target] });
-  expect(response.ok).toBe(true);
-  const { id } = await response.json() as any;
+  const id = await legacySubmit("partial input", target);
   await until(() => store.executions(id)[0]!.state === "uncertain");
   expect(store.executions(id)[0]).toMatchObject({ input_attempted: 1, state: "uncertain" });
   expect(fake.server().typed).toHaveLength(1);

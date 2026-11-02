@@ -158,8 +158,8 @@ export function snapshot(store: Store, engine: Engine) {
           ? engine.view(e.machine_id)?.agents.find((a) => a.pane_id === e.pane_id && a.terminal_id === e.terminal_id) : undefined;
         return {
         id: e.id, round_id: e.round_id, machine_id: e.machine_id, machine_label: engine.machineLabel(e.machine_id), target_kind: e.target_kind, agent_kind: e.agent_kind,
-        agent_status: liveAgent?.agent_status ?? null,
-        agent_name: liveAgent ? liveAgent.name ?? null : e.agent_name, cwd: e.cwd, pane_id: e.pane_id, workspace_label: e.workspace_label, state: e.state,
+        agent_status: liveAgent?.agent_status ?? null, custom_startup_pending: engine.customStartupPending(e.id),
+        agent_name: e.agent_kind === "custom" ? e.agent_name : liveAgent ? liveAgent.name ?? null : e.agent_name, cwd: e.cwd, pane_id: e.pane_id, workspace_label: e.workspace_label, state: e.state,
         note: e.note, error: e.error, session_kind: e.session_kind, session_value: e.session_value, sent_at: e.sent_at, finished_at: e.finished_at,
         manual_session: store.continuation(continuationKey(e))?.manual_required === true || e.agent_kind === "custom",
         identity_state: e.session_value ? "native" : engine.identityPending(e.id) ? "pending"
@@ -169,7 +169,7 @@ export function snapshot(store: Store, engine: Engine) {
         identity_check: store.continuation(`identity:${e.id}`)?.identity_check ?? null,
         terminal_id: e.terminal_id, terminal_state: info.terminal_state, can_resume: info.can_resume, resume_reason: info.resume_reason, resume_mode: info.resume_mode,
         requires_action: info.requires_action === true,
-        can_rename: info.terminal_state === "live" && !!(liveAgent?.agent ?? liveAgent?.display_agent),
+        can_rename: e.agent_kind !== "custom" && info.terminal_state === "live" && !!(liveAgent?.agent ?? liveAgent?.display_agent),
         can_confirm_session: info.can_confirm_session === true,
         can_abandon_restore: info.can_abandon_restore === true,
         restore_kind: info.restore_kind,
@@ -179,7 +179,7 @@ export function snapshot(store: Store, engine: Engine) {
         can_cancel_start: engine.canCancelStartup(e.id),
         can_auto_resume: false, // compatibility for older pages; process launches always require a click
         can_follow_up: info.terminal_state === "live" && (store.continuation(continuationKey(e))?.manual_required || e.agent_kind === "custom" || !!(liveAgent?.agent ?? liveAgent?.display_agent)),
-        can_retry: !store.retryRound(original.id) && ["failed", "uncertain", "cancelled", "lost", "interrupted"].includes(e.state) && (info.terminal_state === "live" || (["not_started", "shell"].includes(info.terminal_state) && e.target_kind === "new")),
+        can_retry: !store.retryRound(original.id) && ["failed", "uncertain", "cancelled", "lost", "interrupted"].includes(e.state) && (info.terminal_state === "live" || (["not_started", "shell"].includes(info.terminal_state) && e.target_kind === "new" && e.agent_kind !== "custom")),
         retry_round_number: store.retryRound(original.id)?.number ?? null,
         web_link: e.pane_id ? webLinkQuery({ machineId: e.machine_id, workspaceId: e.workspace_id, workspaceLabel: e.workspace_label, paneId: e.pane_id }) : null,
       }; }),
@@ -226,12 +226,13 @@ interface NewBroadcastBody {
   title?: unknown;
   prompt?: unknown;
   targets?: { machine?: unknown; pane?: unknown; terminal_id?: unknown; agent_kind?: unknown; session_kind?: unknown; session_value?: unknown; manual?: unknown }[];
-  new?: { machine?: unknown; kind?: unknown; cwd?: unknown; count?: unknown }[];
+  new?: { machine?: unknown; kind?: unknown; cwd?: unknown; count?: unknown; command?: unknown; label?: unknown }[];
 }
 
 /** Turns the form's answer into executions, checked against what the machines have now. */
-export function executionsFrom(body: NewBroadcastBody, engine: Engine): NewExecution[] {
-  const executions: NewExecution[] = [];
+export function executionsFrom(body: NewBroadcastBody, engine: Engine): (NewExecution & { command?: string })[] {
+  const executions: (NewExecution & { command?: string })[] = [];
+  if (body.new !== undefined && !Array.isArray(body.new)) throw new Error("new 必须是数组");
   for (const target of body.targets ?? []) {
     const machine = engine.machine(String(target.machine ?? ""));
     if (!machine) throw new Error(`没有这台机器：${String(target.machine)}`);
@@ -263,15 +264,19 @@ export function executionsFrom(body: NewBroadcastBody, engine: Engine): NewExecu
     const machine = engine.machine(String(spec.machine ?? ""));
     if (!machine || !machine.enabled) throw new Error(`没有可用的机器：${String(spec.machine)}`);
     const kind = String(spec.kind ?? "");
-    if (!AGENT_KINDS.includes(kind)) throw new Error(`不支持的 agent 类型：${kind}`);
+    if (kind !== "custom" && !AGENT_KINDS.includes(kind)) throw new Error(`不支持的 agent 类型：${kind}`);
+    if (kind === "custom" && (typeof spec.command !== "string" || !spec.command.trim() || spec.command.length > 16384 || /[\x00\r\n]/.test(spec.command))) throw new Error("自定义启动命令必须是非空单行文本（最多 16384 字符）");
+    if (spec.label !== undefined && (typeof spec.label !== "string" || !spec.label.trim() || spec.label.length > 120 || /[\x00-\x1f\x7f]/.test(spec.label))) throw new Error("自定义名称必须是 1 到 120 字符的单行文本");
     const cwd = String(spec.cwd ?? "").trim();
     const problem = validCwd(machine.id, cwd);
     if (problem) throw new Error(problem);
-    const count = Math.max(1, Math.min(20, Math.floor(Number(spec.count ?? 1)) || 1));
+    const count = spec.count ?? 1;
+    if (!Number.isSafeInteger(count) || Number(count) < 1 || Number(count) > 20) throw new Error("新 agent 数量必须是 1 到 20 的整数");
     if (machine.id === LOCAL && !isDir(resolveCwd(LOCAL, cwd))) throw new Error(`本机没有这个目录：${cwd}`);
-    for (let n = 0; n < count; n += 1) {
+    for (let n = 0; n < Number(count); n += 1) {
       slot += 1;
-      executions.push({ machine_id: machine.id, machine_label: machine.label, target_kind: "new", agent_kind: kind, cwd, slot });
+      executions.push({ machine_id: machine.id, machine_label: machine.label, target_kind: "new", agent_kind: kind, cwd, slot,
+        ...(kind === "custom" ? { command: spec.command as string, agent_name: typeof spec.label === "string" ? spec.label : "自定义 Agent" } : {}) });
     }
   }
   return executions;
@@ -677,6 +682,13 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
       await conversations.selectTarget(execution(match[1]!), body.terminal_id);
       return json({ ok: true });
     }
+    match = /^\/api\/executions\/(\d+)\/confirm-startup$/.exec(path);
+    if (match) {
+      if (request.method !== "POST") return fail(405, "method", "POST only");
+      const body = await request.json() as { terminal_id?: unknown };
+      await engine.confirmCustomStartup(execution(match[1]!).id, body?.terminal_id);
+      push(); return json({ ok: true });
+    }
     match = /^\/api\/executions\/(\d+)\/confirm-session$/.exec(path);
     if (match) {
       if (request.method !== "POST") return fail(405, "method", "POST only");
@@ -690,14 +702,14 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
       if (request.method !== "POST") return fail(405, "method", "POST only");
       const parentId = Number(match[1]);
       if (!store.getBroadcast(parentId)) throw new Error("原广播记录不存在");
-      const body = await request.json() as { prompt?: unknown; targets?: { execution_id?: unknown; terminal_id?: unknown }[] };
+      const body = await request.json() as { prompt?: unknown; targets?: { execution_id?: unknown; terminal_id?: unknown }[]; new?: NewBroadcastBody["new"] };
       const prompt = typeof body.prompt === "string" ? body.prompt.trimEnd() : "";
       if (!prompt.trim()) throw new Error("请输入要继续广播的内容");
-      if (!Array.isArray(body.targets) || !body.targets.length || body.targets.length > 100) throw new Error("请选择 1 到 100 个 agent");
+      if (body.targets !== undefined && (!Array.isArray(body.targets) || body.targets.length > 100)) throw new Error("targets 必须是最多 100 项的数组");
       const seen = new Set<string>();
-      const executions: NewExecution[] = [];
+      const executions: (NewExecution & { command?: string })[] = executionsFrom({ new: body.new }, engine);
       // Validate the whole selection before creating a task or sending any input.
-      for (const selected of body.targets) {
+      for (const selected of body.targets ?? []) {
         if (!Number.isSafeInteger(selected?.execution_id)) throw new Error("agent 选择无效");
         const original = store.execution(Number(selected.execution_id));
         if (!original || original.broadcast_id !== parentId) throw new Error("所选 agent 不属于这个广播");
@@ -710,14 +722,17 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
         seen.add(key);
         executions.push({ ...e, target_kind: "existing", continuation_source: continuationKey(original), parent_execution_id: original.id });
       }
+      if (!executions.length || executions.length > 100) throw new Error("请选择或新增 1 到 100 个 agent");
       engine.assertAccepting();
       const round = store.createRound(parentId, prompt, executions);
-      engine.submit(round.id);
+      const records = store.executions(parentId).filter(e => e.round_id === round.id);
+      engine.submit(round.id, new Map(records.flatMap((e, i) => executions[i]!.command ? [[e.id, executions[i]!.command!] as const] : [])));
       push();
-      return json({ id: parentId, round_id: round.id, round_number: round.number, executions: executions.length });
+      return json({ id: parentId, round_id: round.id, round_number: round.number, executions: executions.length, execution_ids: records.map(e => e.id) });
     }
     if (path === "/api/broadcasts" && request.method === "POST") {
       const body = (await request.json()) as NewBroadcastBody;
+      if (body.targets !== undefined && (!Array.isArray(body.targets) || body.targets.length)) throw new Error("新建广播只允许新 Agent；请使用 follow-up 在指定任务中继续广播");
       const prompt = typeof body.prompt === "string" ? body.prompt.replace(/\s+$/, "") : "";
       if (!prompt.trim()) throw new Error("prompt 不能为空");
       // the chosen agents are checked against a fresh read of their machines
@@ -733,9 +748,11 @@ function serve(store: Store, engine: Engine, options: WebOptions, updates: Parti
       const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 120) : Array.from(firstLine).slice(0, 60).join("");
       engine.assertAccepting();
       const id = store.createBroadcast({ title, prompt, executions });
-      engine.submit(store.rounds(id)[0]!.id);
+      const round = store.rounds(id)[0]!;
+      const records = store.executions(id);
+      engine.submit(round.id, new Map(records.flatMap((e, i) => executions[i]!.command ? [[e.id, executions[i]!.command!] as const] : [])));
       push();
-      return json({ id, executions: executions.length });
+      return json({ id, round_id: round.id, round_number: round.number, executions: executions.length, execution_ids: records.map(e => e.id) });
     }
     match = /^\/api\/broadcasts\/(\d+)$/.exec(path);
     if (match && request.method === "DELETE") {

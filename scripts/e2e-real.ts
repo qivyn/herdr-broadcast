@@ -1,10 +1,10 @@
-/** Real HTTP → engine → Herdr → PTY → agent receipts, in disposable state. No model calls. */
+/** Real HTTP → engine → Herdr → PTY receipts; fresh custom agents and mixed rounds, no models. */
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Store } from "../src/db.ts";
-import { agentList, herdrResult } from "../src/herdr.ts";
-import type { AgentInfo } from "../src/herdr-types.ts";
+import { Store, type Execution } from "../src/db.ts";
+import { agentList } from "../src/herdr.ts";
+import { shellQuote } from "../src/machine-command.ts";
 import { startWebServer } from "../src/web/server.ts";
 import { isolatedHerdr } from "./e2e-environment.ts";
 
@@ -13,72 +13,84 @@ const store = new Store(join(environment.root, "broadcast.sqlite"));
 let web: ReturnType<typeof startWebServer> | undefined;
 async function until(check: () => boolean | Promise<boolean>, what: string, ms = 30_000) {
   const end = Date.now() + ms;
-  while (!(await check())) {
-    if (Date.now() >= end) throw new Error(`Timeout: ${what}`);
-    await Bun.sleep(100);
-  }
+  while (!await check()) { if (Date.now() >= end) throw new Error(`Timeout: ${what}`); await Bun.sleep(100); }
 }
-const quote = (s: string) => "'" + s.replaceAll("'", "'\\''") + "'";
-async function fake(label: string): Promise<AgentInfo> {
-  const created = await herdrResult<{ workspace: { workspace_id: string }; root_pane: { pane_id: string } }>(["workspace", "create", "--cwd", environment.root, "--label", label, "--no-focus"]);
-  const pane = created.root_pane.pane_id;
-  // Shell startup may be asynchronous; wait for a shell before typing a command into it.
-  await Bun.sleep(500);
-  await herdrResult(["pane", "run", pane, `${quote(process.execPath)} ${quote(join(import.meta.dir, "fake-agent.ts"))} fakebot 4`]);
-  let agent: AgentInfo | undefined;
-  await until(async () => {
-    agent = (await agentList("local")).find(a => a.pane_id === pane && a.agent_status === "idle");
-    return !!agent;
-  }, `fake agent in ${pane}`);
-  return agent!;
-}
-function receipts(agent: AgentInfo, done = false): string[] {
-  const file = join(environment.root, `${agent.pane_id}${done ? ".done" : ""}.jsonl`);
+function receipts(e: Execution, done = false): string[] {
+  const file = join(environment.root, `${e.pane_id}${done ? ".done" : ""}.jsonl`);
   return existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line)) : [];
 }
-function start() {
-  web = startWebServer(store, { host: "127.0.0.1", port: 0, token: null, hosts: [] });
-}
-async function submit(prompt: string, agents: AgentInfo[]) {
+function start() { web = startWebServer(store, { host: "127.0.0.1", port: 0, token: null, hosts: [] }); }
+async function post(path: string, body: unknown) {
   const base = web!.url.replace(/\/$/, "");
-  const response = await fetch(`${base}/api/broadcasts`, {
-    method: "POST", headers: { origin: base, "content-type": "application/json" },
-    body: JSON.stringify({ prompt, targets: agents.map(a => ({ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id })) }),
-  });
-  const result = await response.json() as { id: number };
-  assert.equal(response.ok, true, JSON.stringify(result));
-  return result.id;
+  const r = await fetch(base + path, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify(body) });
+  const result = await r.json() as any;
+  assert.equal(r.ok, true, JSON.stringify(result)); return result;
+}
+const fresh = (count: number) => [{ machine: "local", kind: "custom", cwd: environment.root, count, label: "Offline Agent",
+  command: `${shellQuote(process.execPath)} ${shellQuote(join(import.meta.dir, "fake-agent.ts"))} fakebot 4` }];
+async function confirm(e: Execution) {
+  await until(async () => (await agentList("local")).some(a => a.pane_id === e.pane_id && a.agent_status === "idle"), "fake ready");
+  // Let the startup observer capture the stable CLI after its initial report subprocess exits.
+  await Bun.sleep(400);
+  assert.deepEqual(receipts(e), []);
+  await post(`/api/executions/${e.id}/confirm-startup`, { terminal_id: e.terminal_id });
 }
 try {
-  const one = await fake("e2e one"), two = await fake("e2e two");
-  start();
-  await web!.engine.refreshMachines();
-  const page = await fetch(web!.url);
-  assert.equal(page.status, 200);
-  assert.match(await page.text(), /<html/);
-  const a = await submit("broadcast A", [one, two]);
-  await until(() => store.executions(a).every(e => e.state === "sent"), "A submitted to both recipients");
-  await until(async () => (await agentList("local")).some(a => a.pane_id === one.pane_id && a.agent_status === "working"), "one working on A");
-  const b = await submit("broadcast B", [one]);
-  await until(() => store.executions(b)[0]?.state === "sent", "B submitted while one works");
-  // Closing the Web service cannot retract a submitted native message.
+  start(); await web!.engine.refreshMachines();
+  assert.equal((await fetch(web!.url)).status, 200);
+  const first = await post("/api/broadcasts", { prompt: "broadcast A", new: fresh(2) });
+  await until(() => store.executions(first.id).every(e => !!e.terminal_id), "fresh terminals");
+  const [one, two] = store.executions(first.id) as [Execution, Execution];
+  await confirm(one); await confirm(two);
+  await until(() => store.executions(first.id).every(e => e.state === "sent"), "first round sent");
+  await until(async () => (await agentList("local")).some(a => a.pane_id === one.pane_id && a.agent_status === "working"), "one working");
+  const original = store.executions(first.id);
+  const next = await post(`/api/broadcasts/${first.id}/follow-up`, { prompt: "broadcast B", targets: [{ execution_id: one.id, terminal_id: one.terminal_id }], new: fresh(1) });
+  await until(() => store.executions(first.id).some(e => e.round_id === next.round_id && e.target_kind === "new" && !!e.terminal_id), "third terminal");
+  const three = store.executions(first.id).find(e => e.round_id === next.round_id && e.target_kind === "new")!;
+  await confirm(three);
+  await until(() => store.executions(first.id).every(e => e.state === "sent"), "mixed round sent");
+  assert.equal(store.listBroadcasts().length, 1); assert.equal(store.rounds(first.id).length, 2);
+  assert.deepEqual(store.executions(first.id).slice(0, 2), original);
+  assert.equal(three.workspace_id, one.workspace_id); assert.ok(three.slot > two.slot);
   await web!.stop(); web = undefined;
-  await until(() => receipts(one).length === 2 && receipts(two).length === 1, "both native receipts");
+  await until(() => receipts(one).length === 2 && receipts(two).length === 1 && receipts(three).length === 1, "receipt counts");
   assert.deepEqual(receipts(one), ["broadcast A", "broadcast B"]);
-  assert.deepEqual(receipts(two), ["broadcast A"]);
-  await until(() => receipts(one, true).length === 2 && receipts(two, true).length === 1, "native work completes");
-  start();
-  await web!.engine.refreshMachines();
+  assert.deepEqual(receipts(two), ["broadcast A"]); assert.deepEqual(receipts(three), ["broadcast B"]);
+  await until(() => receipts(one, true).length === 2, "work complete");
+  start(); await web!.engine.refreshMachines();
   for (let i = 0; i < 3; i++) assert.equal((await fetch(web!.url + "api/state")).status, 200);
-  await web!.engine.settle();
-  await Bun.sleep(500);
-  assert.deepEqual(receipts(one), ["broadcast A", "broadcast B"], "restart/refresh must not replay");
-  assert.deepEqual(receipts(two), ["broadcast A"], "restart/refresh must not replay");
-  assert.ok([...store.executions(a), ...store.executions(b)].every(e => e.state === "sent"), "delivery results stay sent, not task-completed");
-  console.log(JSON.stringify({ result: "passed", checks: ["HTTP broadcast to two agents", "submission while working", "native receipt order and counts", "delivery survives Web stop", "restart/refresh never replay", "delivery distinct from work completion"] }, null, 2));
-} catch (error) {
-  environment.diagnostics(); throw error;
-} finally {
-  try { await web?.stop(); store.close(); }
-  finally { await environment.close(); }
-}
+  await web!.engine.settle(); await Bun.sleep(500);
+  assert.deepEqual(receipts(one), ["broadcast A", "broadcast B"]);
+  assert.deepEqual(receipts(two), ["broadcast A"]); assert.deepEqual(receipts(three), ["broadcast B"]);
+  assert.ok(store.executions(first.id).every(e => e.state === "sent"));
+  // Hold a real Herdr-created terminal before the creation response reaches the startup waiter.
+  // Cancelling/draining at this boundary must prevent the command itself, not just its prompt.
+  for (const action of ["cancel", "drain"] as const) {
+    const engine = web!.engine as any;
+    const placeFor = engine.placeFor;
+    let created = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const marker = join(environment.root, `must-not-launch-${action}`);
+    engine.placeFor = async (...args: any[]) => { const result = await placeFor.apply(engine, args); created = true; await gate; return result; };
+    try {
+      const request = await post("/api/broadcasts", { prompt: "never deliver after creation ended", new: [{ ...fresh(1)[0],
+        command: `printf launched > ${shellQuote(marker)}; ${fresh(1)[0]!.command}` }] });
+      const execution = store.executions(request.id)[0]!;
+      await until(() => created, "gated real terminal creation");
+      if (action === "cancel") await post(`/api/executions/${execution.id}/cancel`, {});
+      else { web!.engine.pause(); web!.engine.resume(); }
+      release();
+      await until(() => ["failed", "cancelled"].includes(store.execution(execution.id)!.state), "creation stopped without launching");
+      const stopped = store.execution(execution.id)!;
+      assert.equal(stopped.state, action === "cancel" ? "cancelled" : "failed");
+      assert.ok(stopped.terminal_id, "the newly created terminal remains inspectable");
+      assert.equal(existsSync(marker), false, "startup command must never have executed");
+      assert.deepEqual(receipts(stopped), [], "no prompt reaches the fake Agent");
+      await web!.engine.refresh("local");
+      assert.equal(existsSync(marker), false, "refresh never replays an ended launch");
+    } finally { release(); engine.placeFor = placeFor; }
+  }
+  console.log(JSON.stringify({ result: "passed", checks: ["new custom terminals", "zero prompts before confirmation", "mixed rounds", "one task", "receipt counts and order", "same workspace", "busy submission", "restart never replays", "cancel/drain during terminal creation never executes commands"] }));
+} catch (error) { environment.diagnostics(); throw error; }
+finally { try { await web?.stop(); store.close(); } finally { await environment.close(); } }

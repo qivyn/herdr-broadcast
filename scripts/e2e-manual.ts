@@ -30,18 +30,20 @@ async function runFixture(pane: string, terminal: string) {
   await until(async () => { try { return (await terminalProcesses("local", pane, terminal)).length > 0; } catch { return false; } }, "foreground process identity");
 }
 try {
-  const created = await herdrResult<any>(["workspace", "create", "--cwd", env.root, "--label", "manual fixture", "--no-focus"]);
-  const pane = created.root_pane;
-  await runFixture(pane.pane_id, pane.terminal_id);
   web = startWebServer(store, { host: "127.0.0.1", port: 0, token: null, hosts: [] });
   await web.engine.refreshMachines();
-  const target = { machine: "local", pane: pane.pane_id, terminal_id: pane.terminal_id, manual: true };
-  assert.equal((await request("/api/machines/local/manual-binding", target)).ok, true);
-  const sent = await request("/api/broadcasts", { prompt: "manual first", targets: [target] });
+  const sent = await request("/api/broadcasts", { prompt: "manual first", new: [{ machine: "local", kind: "custom", cwd: env.root,
+    command: `${shellQuote(process.execPath)} ${shellQuote(file)} ${shellQuote(receipts)}` }] });
   assert.equal(sent.ok, true, JSON.stringify(sent));
   const id = sent.body.id;
-  await until(() => store.executions(id)[0]?.state === "sent", "first delivery");
+  await until(() => !!store.executions(id)[0]?.terminal_id, "custom terminal");
   const e = store.executions(id)[0]!;
+  const pane = { pane_id: e.pane_id!, terminal_id: e.terminal_id! };
+  await until(async () => { try { await terminalProcesses("local", pane.pane_id, pane.terminal_id); return true; } catch { return false; } }, "process started");
+  await Bun.sleep(400);
+  assert.deepEqual(received(), []);
+  assert.equal((await request(`/api/executions/${e.id}/confirm-startup`, { terminal_id: e.terminal_id })).ok, true);
+  await until(() => store.execution(e.id)?.state === "sent", "first delivery");
   assert.equal(e.session_value, null);
   assert.equal((await request(`/api/broadcasts/${id}/follow-up`, { prompt: "manual followup", targets: [{ execution_id: e.id, terminal_id: e.terminal_id }] })).ok, true);
   await until(() => received().length === 2, "two receipts");
@@ -49,7 +51,7 @@ try {
   await herdrResult(["pane", "send-keys", pane.pane_id, "ctrl+c"]);
   await until(async () => { try { await terminalProcesses("local", pane.pane_id, pane.terminal_id); return false; } catch { return true; } }, "process exited");
   assert.equal((await request(`/api/broadcasts/${id}/follow-up`, { prompt: "must not hit shell", targets: [{ execution_id: e.id, terminal_id: e.terminal_id }] })).ok, false);
-  await herdrResult(["workspace", "close", created.workspace.workspace_id]);
+  await herdrResult(["workspace", "close", store.execution(e.id)!.workspace_id!]);
   assert.equal((await request(`/api/executions/${e.id}/continue`, {})).ok, true);
   const binding = store.continuation(`execution:${e.id}`)!;
   assert.ok((await paneList("local")).some(p => p.terminal_id === binding.terminal_id));

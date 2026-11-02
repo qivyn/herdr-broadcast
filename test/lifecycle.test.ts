@@ -55,15 +55,17 @@ describe("immediate delivery identity", () => {
     writeFileSync(join(configDir, "config.toml"), `web_port = ${new URL(web.url).port}\n`);
     await web.engine.refreshMachines(); await web.engine.refresh("local");
     try {
-    const proc = Bun.spawn([process.execPath, new URL("../src/main.ts", import.meta.url).pathname, "send", "--prompt", "original task", "--to", agent.pane_id], {
+    const id = store.createBroadcast({ title: "legacy", prompt: "previous", executions: [{ machine_id: "local", machine_label: "Local", target_kind: "existing", agent_kind: "pi", pane_id: agent.pane_id, terminal_id: agent.terminal_id, session_kind: "path", session_value: path }] });
+    const original = store.executions(id)[0]!; store.update(original.id, { state: "sent" });
+    const proc = Bun.spawn([process.execPath, new URL("../src/main.ts", import.meta.url).pathname, "follow-up", "--broadcast", String(id), "--execution", String(original.id), "--prompt", "original task"], {
       env: { ...process.env, HERDR_PLUGIN_CONFIG_DIR: configDir, HERDR_PLUGIN_STATE_DIR: fake.dir, HERDR_SOCKET_PATH: "" },
       stdout: "pipe", stderr: "pipe",
     });
     const [code, stdout, stderr] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
     expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
     expect(stdout).toContain("broadcast #1");
-    await until(() => store.executions(1)[0]!.state === "sent");
-    expect(store.executions(1)[0]).toMatchObject({ state: "sent", session_kind: "path", session_value: path });
+    await until(() => store.executions(1).at(-1)!.state === "sent");
+    expect(store.executions(1).at(-1)).toMatchObject({ state: "sent", session_kind: "path", session_value: path });
     expect(fake.server().prompts).toEqual([{ pane_id: agent.pane_id, text: "original task" }]);
     } finally { await web.stop(); }
   });

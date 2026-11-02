@@ -10,6 +10,13 @@ const timing = { tickMs: 20, localPollMs: 40, remotePollMs: 40, launchPollMs: 30
 const target = (a: ReturnType<FakeHerdr["addAgent"]>, machine = "local") => ({ machine_id: machine, machine_label: machine, target_kind: "existing" as const, agent_kind: a.agent, pane_id: a.pane_id, terminal_id: a.terminal_id });
 const post = (base: string, path: string, body: unknown) => fetch(base + path, { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: JSON.stringify(body) });
 
+async function followExisting(web: ReturnType<typeof startWebServer>, store: Store, a: ReturnType<FakeHerdr["addAgent"]>, prompt: string, machine = "local") {
+  const id = store.createBroadcast({ title: "legacy", prompt: "previous", executions: [target(a, machine)] });
+  const e = store.executions(id).at(-1)!; store.update(e.id, { state: "sent" });
+  await post(web.url, `api/executions/${e.id}/confirm-session`, { terminal_id: a.terminal_id });
+  return post(web.url, `api/broadcasts/${id}/follow-up`, { prompt, targets: [{ execution_id: e.id, terminal_id: a.terminal_id }] });
+}
+
 test("obsolete event hooks and snapshots never dispatch history", async () => {
   const fake = new FakeHerdr(), store = new Store(fake.dbFile), engine = new Engine(store, () => {}, timing);
   try {
@@ -26,9 +33,9 @@ for (const machine of ["local", "remote"]) test(`HTTP sends immediately to a bus
   const store = new Store(fake.dbFile), a = fake.addAgent(machine, "claude", "working"), web = startWebServer(store, options, timing);
   try {
     await web.engine.refreshMachines();
-    const r = await post(web.url, "api/broadcasts", { prompt: "now", targets: [{ machine, pane: a.pane_id, terminal_id: a.terminal_id }] });
+    const r = await followExisting(web, store, a, "now", machine);
     expect(r.ok).toBe(true); const result = await r.json() as any;
-    await until(() => store.executions(result.id)[0]!.state === "sent");
+    await until(() => store.executions(result.id).at(-1)!.state === "sent");
     expect(fake.server(machine).prompts).toEqual([{ pane_id: a.pane_id, text: "now" }]);
     expect(fake.server(machine).agents[0]!.agent_status).toBe("working");
   } finally { await web.stop(); store.close(); fake.cleanup(); }
@@ -39,8 +46,8 @@ test("restart preserves delivery history and never sends an old queued or interr
   try {
     const r = await post(web.url, "api/broadcasts", { prompt: "first", new: [{ machine: "local", kind: "claude", cwd: "/tmp", count: 1 }] });
     expect(r.ok).toBe(true); const { id } = await r.json() as any;
-    await until(() => store.executions(id)[0]!.state === "sent");
-    const sent = store.executions(id)[0]!;
+    await until(() => store.executions(id).at(-1)!.state === "sent");
+    const sent = store.executions(id).at(-1)!;
     await web.stop();
     const old = store.createRound(id, "never replay", [{ ...sent, target_kind: "existing" }]);
     const legacy = store.executions(id).find(e => e.round_id === old.id)!; store.update(legacy.id, { state: "queued" });
@@ -57,7 +64,7 @@ test("drain timeout restores acceptance while already accepted input completes",
   fake.mutate(s => { s.servers.local!.promptDelayMs = 300; });
   const web = startWebServer(store, options, timing);
   try {
-    const r = await post(web.url, "api/broadcasts", { prompt: "slow", targets: [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }] });
+    const r = await followExisting(web, store, a, "slow");
     expect(r.ok).toBe(true);
     expect(await web.drain(20)).toBe(false); expect(web.engine.dispatching).toBe(true);
     expect(await web.drain()).toBe(true); expect(web.engine.dispatching).toBe(false);
@@ -74,11 +81,11 @@ test("closing browser streams leaves an accepted send running; snapshots and ref
   const web = startWebServer(store, options, timing), streams = [new AbortController(), new AbortController()];
   try {
     for (const c of streams) { const r = await fetch(web.url + "api/events", { signal: c.signal }); await r.body!.getReader().read(); }
-    const r = await post(web.url, "api/broadcasts", { prompt: "after close", targets: [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }] });
+    const r = await followExisting(web, store, a, "after close");
     expect(r.ok).toBe(true); streams.forEach(c => c.abort());
     const { id } = await r.json() as any;
-    await until(() => store.executions(id)[0]?.state === "sent");
-    expect(web.engine.identityPending(store.executions(id)[0]!.id)).toBe(true);
+    await until(() => store.executions(id).at(-1)?.state === "sent");
+    expect(web.engine.identityPending(store.executions(id).at(-1)!.id)).toBe(true);
     await Promise.all(Array.from({ length: 8 }, () => fetch(web.url + "api/state")));
     expect(fake.server().prompts).toEqual([{ pane_id: a.pane_id, text: "after close" }]);
   } finally { streams.forEach(c => c.abort()); await web.stop(); store.close(); fake.cleanup(); }
@@ -88,8 +95,9 @@ test("a pause during HTTP validation rejects the request without creating deferr
   const fake = new FakeHerdr(), store = new Store(fake.dbFile), a = fake.addAgent("local", "claude");
   const web = startWebServer(store, options, timing), refresh = web.engine.refresh.bind(web.engine);
   try {
-    web.engine.refresh = async id => { await refresh(id); web.engine.pause(); };
-    const r = await post(web.url, "api/broadcasts", { prompt: "never", targets: [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }] });
+    const accepting = web.engine.assertAccepting.bind(web.engine);
+    web.engine.assertAccepting = () => { web.engine.pause(); accepting(); };
+    const r = await post(web.url, "api/broadcasts", { prompt: "never", new: [{ machine: "local", kind: "claude", cwd: "/tmp" }] });
     expect(r.status).toBe(503); expect(store.listBroadcasts()).toEqual([]); expect(fake.server().prompts).toEqual([]);
   } finally { await web.stop(); store.close(); fake.cleanup(); }
 });
@@ -101,9 +109,9 @@ test("draining during agent creation completes that accepted send before shutdow
   try {
     const r = await post(web.url, "api/broadcasts", { prompt: "after launch", new: [{ machine: "local", kind: "claude", cwd: "/tmp", count: 1 }] });
     expect(r.ok).toBe(true); const { id } = await r.json() as any;
-    expect(store.executions(id)[0]!.state).toBe("starting");
+    expect(store.executions(id).at(-1)!.state).toBe("starting");
     expect(await web.drain()).toBe(true);
-    expect(store.executions(id)[0]!.state).toBe("sent");
+    expect(store.executions(id).at(-1)!.state).toBe("sent");
     expect(fake.server().prompts.map(p => p.text)).toEqual(["after launch"]);
     expect(web.engine.dispatching).toBe(false);
   } finally { await web.stop(); store.close(); fake.cleanup(); }
@@ -116,8 +124,8 @@ for (const action of ["cancel", "drain"]) test(`${action} ends an HTTP startup-c
   try {
     const r = await post(web.url, "api/broadcasts", { prompt: "after trust", new: [{ machine: "local", kind: "claude", cwd: "/tmp", count: 1 }] });
     expect(r.ok).toBe(true); const { id } = await r.json() as any;
-    await until(() => web.engine.canCancelStartup(store.executions(id)[0]!.id));
-    const e = store.executions(id)[0]!;
+    await until(() => web.engine.canCancelStartup(store.executions(id).at(-1)!.id));
+    const e = store.executions(id).at(-1)!;
     const state = await (await fetch(web.url + "api/state")).json() as any;
     expect(state.state.broadcasts[0].executions[0].can_cancel_start).toBe(true);
     if (action === "cancel") expect((await post(web.url, `api/executions/${e.id}/cancel`, {})).ok).toBe(true);
@@ -135,11 +143,11 @@ test("history deletion waits for delivery and never retracts a message from the 
   fake.mutate(s => { s.servers.local!.promptDelayMs = 300; });
   const web = startWebServer(store, options, timing);
   try {
-    const r = await post(web.url, "api/broadcasts", { prompt: "keep in agent", targets: [{ machine: "local", pane: a.pane_id, terminal_id: a.terminal_id }] });
+    const r = await followExisting(web, store, a, "keep in agent");
     const { id } = await r.json() as any;
     const remove = () => fetch(web.url + `api/broadcasts/${id}`, { method: "DELETE", headers: { origin: web.url } });
     expect((await remove()).status).toBe(409);
-    const e = store.executions(id)[0]!;
+    const e = store.executions(id).at(-1)!;
     expect((await post(web.url, `api/executions/${e.id}/cancel`, {})).status).toBe(410);
     await until(() => store.execution(e.id)?.state === "sent");
     const snapshot = await (await fetch(web.url + "api/state")).json() as any;
