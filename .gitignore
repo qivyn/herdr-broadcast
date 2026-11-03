@@ -7,11 +7,4 @@ node_modules/
 dist/
 test-results/
 
-# Local collaboration standards, templates, and task records
-/AGENTS.md
-/docs/engineering/L3_STANDARD.md
-/.github/ISSUE_TEMPLATE/task.md
-/.github/pull_request_template.md
-/templates/l3-starter/
-/templates/README.md
-/docs/tasks/
+/docs/plans/
